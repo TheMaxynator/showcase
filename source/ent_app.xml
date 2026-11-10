@@ -13,6 +13,9 @@
     <!-- Open URLs (for prefs:root= deep link to Personal Hotspot) -->
     <key>com.apple.private.applesupport.allow-url-handling</key>
     <true/>
+    <!-- Send media commands to the local Spotify player -->
+    <key>com.apple.mediaremote.send-commands</key>
+    <true/>
     <!-- Pause other Wi-Fi networks while the radio hosts CarPlay -->
     <key>com.apple.wifi.manager-access</key>
     <true/>

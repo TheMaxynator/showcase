@@ -2818,6 +2818,261 @@ static OSStatus carplay_aac_input_callback(
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {}
 @end
 
+/* Load the local Now Playing API when the panel opens. CarPlay startup
+ * has no dependency on these MediaRemote symbols. */
+typedef struct {
+    void (*getBundle)(dispatch_queue_t, void (^)(CFStringRef));
+    void (*getInfo)(dispatch_queue_t, void (^)(CFDictionaryRef));
+    CFTypeRef (*localOrigin)(void);
+    Boolean (*sendToApp)(uint32_t, CFDictionaryRef, CFTypeRef, CFStringRef,
+                         uint32_t, dispatch_queue_t, void (^)(uint32_t, CFArrayRef));
+} ShowcaseMediaRemote;
+
+static const ShowcaseMediaRemote *showcase_media_remote(void) {
+    static ShowcaseMediaRemote remote;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *framework = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
+                                 RTLD_LAZY | RTLD_LOCAL);
+        if (!framework) return;
+        remote.getBundle = dlsym(framework, "MRMediaRemoteGetNowPlayingApplicationDisplayID");
+        remote.getInfo = dlsym(framework, "MRMediaRemoteGetNowPlayingInfo");
+        remote.localOrigin = dlsym(framework, "MRMediaRemoteGetLocalOrigin");
+        remote.sendToApp = dlsym(framework, "MRMediaRemoteSendCommandToApp");
+    });
+    return remote.getBundle && remote.getInfo && remote.localOrigin && remote.sendToApp
+        ? &remote : NULL;
+}
+
+/* BEGIN Spotify target */
+static BOOL showcase_spotify_matches(NSString *observed, NSString *expected) {
+    if (![observed isKindOfClass:[NSString class]]) return NO;
+    NSString *variantPrefix = @"com.spotify.client.";
+    BOOL isSpotify = [observed isEqualToString:@"com.spotify.client"] ||
+        ([observed hasPrefix:variantPrefix] && observed.length > variantPrefix.length);
+    return isSpotify && (!expected || [observed isEqualToString:expected]);
+}
+/* END Spotify target */
+
+enum {
+    SpotifyTogglePlayPause = 2,
+    SpotifyNextTrack = 4,
+    SpotifyPreviousTrack = 5,
+};
+
+@interface LocalSpotifyView : UIView
+- (void)startMonitoring;
+- (void)stopMonitoring;
+@end
+
+@implementation LocalSpotifyView {
+    UILabel *_heading;
+    UILabel *_track;
+    UILabel *_artist;
+    UIButton *_play;
+    NSArray<UIButton *> *_buttons;
+    NSTimer *_refreshTimer;
+    NSUInteger _request;
+    BOOL _requestPending;
+    NSString *_bundle;
+}
+
+- (UIButton *)buttonWithTitle:(NSString *)title label:(NSString *)label command:(NSInteger)command {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    [button setTitle:title forState:UIControlStateNormal];
+    [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [button setTitleColor:[UIColor colorWithWhite:1 alpha:0.33] forState:UIControlStateDisabled];
+    button.titleLabel.font = [UIFont systemFontOfSize:23 weight:UIFontWeightSemibold];
+    button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+    button.layer.cornerRadius = 10;
+    button.accessibilityLabel = label;
+    button.tag = command;
+    button.enabled = NO;
+    [button addTarget:self action:@selector(sendPlaybackCommand:) forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if (!(self = [super initWithFrame:frame])) return nil;
+    self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.97];
+    self.layer.cornerRadius = 16;
+    self.layoutMargins = UIEdgeInsetsMake(14, 16, 14, 16);
+
+    _heading = [[UILabel alloc] init];
+    _heading.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    _heading.textColor = [UIColor colorWithRed:0.42 green:0.94 blue:0.59 alpha:1];
+    _track = [[UILabel alloc] init];
+    _track.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    _track.textColor = [UIColor whiteColor];
+    _track.numberOfLines = 2;
+    _artist = [[UILabel alloc] init];
+    _artist.font = [UIFont systemFontOfSize:14];
+    _artist.textColor = [UIColor colorWithWhite:0.78 alpha:1];
+    _artist.hidden = YES;
+
+    _play = [self buttonWithTitle:@"⏯︎" label:L(@"Play or Pause") command:SpotifyTogglePlayPause];
+    _buttons = @[[self buttonWithTitle:@"⏮︎" label:L(@"Previous Track") command:SpotifyPreviousTrack],
+                 _play,
+                 [self buttonWithTitle:@"⏭︎" label:L(@"Next Track") command:SpotifyNextTrack]];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:_buttons];
+    buttons.distribution = UIStackViewDistributionFillEqually;
+    buttons.spacing = 8;
+    [buttons.heightAnchor constraintEqualToConstant:46].active = YES;
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[_heading, _track, _artist, buttons]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 7;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:stack];
+    UILayoutGuide *margins = self.layoutMarginsGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:margins.topAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:margins.bottomAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+    ]];
+    return self;
+}
+
+- (void)showTrack:(NSString *)title artist:(NSString *)artist bundle:(NSString *)bundle rate:(NSNumber *)rate {
+    _bundle = [bundle copy];
+    _track.text = title;
+    _artist.text = artist;
+    _artist.hidden = artist.length == 0;
+    NSString *playTitle = rate ? (rate.doubleValue > 0 ? @"⏸︎" : @"▶︎") : @"⏯︎";
+    [_play setTitle:playTitle forState:UIControlStateNormal];
+    for (UIButton *button in _buttons) button.enabled = (_bundle != nil);
+}
+
+- (void)startMonitoring {
+    if (_refreshTimer) return;
+    _heading.text = L(@"Local Spotify");
+    [self showTrack:L(@"Start playback in Spotify on this device.") artist:nil bundle:nil rate:nil];
+    if (!showcase_media_remote()) {
+        [self showTrack:L(@"Local playback controls unavailable.") artist:nil bundle:nil rate:nil];
+        return;
+    }
+    __weak LocalSpotifyView *weakSelf = self;
+    _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
+        [weakSelf refreshPlayback];
+    }];
+    [self refreshPlayback];
+}
+
+- (void)stopMonitoring {
+    [_refreshTimer invalidate];
+    _refreshTimer = nil;
+    _request++;
+    _requestPending = NO;
+    _bundle = nil;
+}
+
+- (void)dealloc {
+    [_refreshTimer invalidate];
+}
+
+- (BOOL)isCurrentRequest:(NSUInteger)request {
+    return _refreshTimer && _requestPending && request == _request;
+}
+
+- (NSUInteger)beginRequest {
+    NSUInteger request = ++_request;
+    _requestPending = YES;
+    __weak LocalSpotifyView *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        LocalSpotifyView *panel = weakSelf;
+        if (![panel isCurrentRequest:request]) return;
+        panel->_requestPending = NO;
+        [panel showTrack:L(@"Local playback controls unavailable.") artist:nil bundle:nil rate:nil];
+    });
+    return request;
+}
+
+- (void)refreshPlayback {
+    if (!_refreshTimer || _requestPending) return;
+    const ShowcaseMediaRemote *remote = showcase_media_remote();
+    NSUInteger request = [self beginRequest];
+    dispatch_queue_t queue = dispatch_get_main_queue();
+    __weak LocalSpotifyView *weakSelf = self;
+    remote->getBundle(queue, ^(CFStringRef identifier) {
+        LocalSpotifyView *panel = weakSelf;
+        if (![panel isCurrentRequest:request]) return;
+        NSString *bundle = (__bridge NSString *)identifier;
+        if (!showcase_spotify_matches(bundle, nil)) {
+            panel->_requestPending = NO;
+            [panel showTrack:L(@"Start playback in Spotify on this device.") artist:nil bundle:nil rate:nil];
+            return;
+        }
+        remote->getInfo(queue, ^(CFDictionaryRef information) {
+            if (![weakSelf isCurrentRequest:request]) return;
+            NSDictionary *info = (__bridge NSDictionary *)information;
+            /* Discard a snapshot taken while iOS was switching media apps. */
+            remote->getBundle(queue, ^(CFStringRef current) {
+                LocalSpotifyView *currentPanel = weakSelf;
+                if (![currentPanel isCurrentRequest:request]) return;
+                currentPanel->_requestPending = NO;
+                if (!showcase_spotify_matches((__bridge NSString *)current, bundle)) {
+                    [currentPanel showTrack:L(@"Start playback in Spotify on this device.")
+                                     artist:nil bundle:nil rate:nil];
+                    return;
+                }
+                NSString *title = info[@"kMRMediaRemoteNowPlayingInfoTitle"];
+                NSString *artist = info[@"kMRMediaRemoteNowPlayingInfoArtist"];
+                NSNumber *rate = info[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"];
+                if (![title isKindOfClass:[NSString class]] || !title.length)
+                    title = L(@"Waiting for Spotify track information…");
+                [currentPanel showTrack:title artist:[artist isKindOfClass:[NSString class]] ? artist : nil
+                                 bundle:bundle rate:[rate isKindOfClass:[NSNumber class]] ? rate : nil];
+            });
+        });
+    });
+}
+
+- (void)sendPlaybackCommand:(UIButton *)button {
+    if (!_refreshTimer || !_bundle) return;
+    const ShowcaseMediaRemote *remote = showcase_media_remote();
+    NSString *target = _bundle;
+    uint32_t command = (uint32_t)button.tag;
+    NSUInteger request = [self beginRequest];
+    for (UIButton *control in _buttons) control.enabled = NO;
+    dispatch_queue_t queue = dispatch_get_main_queue();
+    __weak LocalSpotifyView *weakSelf = self;
+    remote->getBundle(queue, ^(CFStringRef identifier) {
+        LocalSpotifyView *panel = weakSelf;
+        if (![panel isCurrentRequest:request]) return;
+        if (!showcase_spotify_matches((__bridge NSString *)identifier, target)) {
+            panel->_requestPending = NO;
+            [panel showTrack:L(@"Start playback in Spotify on this device.") artist:nil bundle:nil rate:nil];
+            return;
+        }
+        CFTypeRef origin = remote->localOrigin();
+        NSDictionary *options = @{
+            @"kMRMediaRemoteOptionDisableImplicitAppLaunchBehaviors": @YES,
+            @"kMRMediaRemoteOptionDisableFallbackContent": @YES,
+        };
+        Boolean queued = origin && remote->sendToApp(command, (__bridge CFDictionaryRef)options,
+            origin, (__bridge CFStringRef)target, 0, queue, ^(uint32_t error, CFArrayRef statuses) {
+                LocalSpotifyView *currentPanel = weakSelf;
+                if (![currentPanel isCurrentRequest:request]) return;
+                currentPanel->_requestPending = NO;
+                if (error) {
+                    ip_log("local Spotify command rejected (code=%u)", error);
+                    [currentPanel showTrack:L(@"Local playback controls unavailable.")
+                                     artist:nil bundle:nil rate:nil];
+                } else {
+                    [currentPanel refreshPlayback];
+                }
+            });
+        if (!queued && [panel isCurrentRequest:request]) {
+            panel->_requestPending = NO;
+            [panel showTrack:L(@"Local playback controls unavailable.") artist:nil bundle:nil rate:nil];
+        }
+    });
+}
+
+@end
+
 /* A bounded, scrollable compatibility report. Bluetooth failures used to
  * return the state machine to Idle with no user-visible explanation; a long
  * raw daemon log also does not belong in a UIAlertController message. */
@@ -3488,6 +3743,7 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
 @property (nonatomic, strong) UIButton *settingsButton;    /* top-left, revealed with close during Active */
 @property (nonatomic, strong) UIButton *starButton;        /* top-right on the setup screen */
 @property (nonatomic, strong) ControlsOverlayView *controlsOverlay;
+@property (nonatomic, strong) LocalSpotifyView *spotifyPanel;
 
 /* Three-finger tap is reserved for Showcase chrome and leaves pinch to CarPlay. */
 @property (nonatomic, strong) UITapGestureRecognizer *controlsGesture;
@@ -3859,6 +4115,7 @@ static pid_t reusable_baa_broker(void) {
 }
 
 - (void)handleBackground {
+    [self.spotifyPanel stopMonitoring];
     if (self.state != StateIdle && self.state != StateStopping) {
         [self.vc cancelCarPlayTouch];
         ip_log("backgrounded — preserving CarPlay session");
@@ -4040,9 +4297,23 @@ static pid_t reusable_baa_broker(void) {
     self.controlsOverlay.hidden = YES;
     [content addSubview:self.controlsOverlay];
 
-    /* Any tap on the dimmed screen returns to CarPlay. */
-    [self.controlsOverlay addGestureRecognizer:[[UITapGestureRecognizer alloc]
+    /* Taps on the dimmed area dismiss the menu. Panel controls handle their own taps. */
+    UIView *dismissArea = [[UIView alloc] initWithFrame:self.controlsOverlay.bounds];
+    dismissArea.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.controlsOverlay addSubview:dismissArea];
+    [dismissArea addGestureRecognizer:[[UITapGestureRecognizer alloc]
         initWithTarget:self action:@selector(hideChrome)]];
+    self.spotifyPanel = [[LocalSpotifyView alloc] initWithFrame:CGRectZero];
+    self.spotifyPanel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.controlsOverlay addSubview:self.spotifyPanel];
+    NSLayoutConstraint *panelWidth = [self.spotifyPanel.widthAnchor constraintEqualToConstant:344];
+    panelWidth.priority = UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[
+        panelWidth,
+        [self.spotifyPanel.widthAnchor constraintLessThanOrEqualToAnchor:self.controlsOverlay.widthAnchor constant:-44],
+        [self.spotifyPanel.centerXAnchor constraintEqualToAnchor:self.controlsOverlay.centerXAnchor],
+        [self.spotifyPanel.centerYAnchor constraintEqualToAnchor:self.controlsOverlay.centerYAnchor],
+    ]];
 
     /* Close button, top right, only while CarPlay runs */
     self.closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -4181,6 +4452,7 @@ static pid_t reusable_baa_broker(void) {
 }
 
 - (void)renderState {
+    [self.spotifyPanel stopMonitoring];
     self.setupOverlay.hidden = NO;
     self.closeButton.hidden = YES;
     self.controlsGesture.enabled = (self.state == StateActive);
@@ -4312,7 +4584,10 @@ static pid_t reusable_baa_broker(void) {
 }
 
 - (void)closeTapped { [self stopFlow]; }
-- (void)settingsTapped { [self presentSettingsPage:nil]; }
+- (void)settingsTapped {
+    [self.spotifyPanel stopMonitoring];
+    [self presentSettingsPage:nil];
+}
 
 - (void)starTapped {
     if (self.vc.presentedViewController) return;
@@ -4359,6 +4634,8 @@ static pid_t reusable_baa_broker(void) {
 - (void)showChrome {
     if (self.state != StateActive || self.chromeVisible) return;
     self.chromeVisible = YES;
+    [self.vc cancelCarPlayTouch];
+    [self.spotifyPanel startMonitoring];
     self.controlsOverlay.alpha = 0;
     self.controlsOverlay.hidden = NO;
     self.settingsButton.hidden = NO;
@@ -4371,12 +4648,13 @@ static pid_t reusable_baa_broker(void) {
 }
 - (void)hideChrome {
     self.chromeVisible = NO;
+    [self.spotifyPanel stopMonitoring];
     [UIView animateWithDuration:0.18 animations:^{
         self.controlsOverlay.alpha = 0;
         self.settingsButton.alpha = 0;
         self.closeButton.alpha = 0;
     } completion:^(BOOL d) {
-        if (self.state == StateActive) {
+        if (self.state == StateActive && !self.chromeVisible) {
             self.controlsOverlay.hidden = YES;
             self.settingsButton.hidden = YES;
             self.closeButton.hidden = YES;

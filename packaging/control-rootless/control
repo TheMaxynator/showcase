@@ -29,3 +29,6 @@ Description: Wireless CarPlay receiver for rootless jailbreaks.
  .
  The prefs3 build uses one-sided notch padding, finishes drags outside
  the video area, and bounds recovery waits during relaunch.
+ .
+ The prefs4 test build adds local Spotify controls to the three-finger
+ menu during CarPlay.

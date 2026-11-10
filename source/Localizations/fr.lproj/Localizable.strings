@@ -3,6 +3,13 @@
 "Wi-Fi network is required." = "Un réseau Wi-Fi est requis.";
 "Wi-Fi name must be at least 6 characters. iOS rejects shorter names for CarPlay." = "Le nom Wi-Fi doit comporter au moins 6 caractères. iOS refuse les noms plus courts pour CarPlay.";
 "Wi-Fi name cannot contain \"%@\". Rename this %@ in Settings › General › About › Name." = "Le nom Wi-Fi ne peut pas contenir « %@ ». Renommez cet %@ dans Réglages › Général › Informations › Nom.";
+"Play or Pause" = "Lire ou mettre en pause";
+"Previous Track" = "Piste précédente";
+"Next Track" = "Piste suivante";
+"Local Spotify" = "Spotify local";
+"Start playback in Spotify on this device." = "Lancez la lecture dans Spotify sur cet appareil.";
+"Local playback controls unavailable." = "Les commandes de lecture locales sont indisponibles.";
+"Waiting for Spotify track information…" = "En attente des informations sur le titre Spotify…";
 "Copy Diagnostic" = "Copier le diagnostic";
 "Close" = "Fermer";
 "Copied" = "Copié";

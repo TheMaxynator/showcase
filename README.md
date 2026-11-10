@@ -23,6 +23,14 @@ The `prefs3` build adds the following native receiver changes.
 - Finish a CarPlay drag at the edge when it ends outside the displayed image. [Showcase+ v1.4.0 touch handling](https://github.com/mymolasses/showcase/commit/3a8a772a7d951e4560e3887ea65c79d702f06cc8)
 - Keep Wi-Fi hardware detection off the UI thread and bound recovery waits for system commands and the authentication broker. [Showcase+ v1.3.3](https://github.com/mymolasses/showcase/commit/317549a221c68c90ca7b51536494d35d4ccfed20)
 
+The `prefs4` test build adds a Local Spotify panel to the three-finger menu.
+Start a track in Spotify on the receiver, return to Showcase, and tap
+CarPlay with three fingers. The panel reads the track and artist from the
+local iOS Now Playing session and sends play, pause, and skip commands to the
+active Spotify app. It recognizes `com.spotify.client` and bundle IDs with
+the `com.spotify.client.` prefix. Device testing with the installed Spotify
+build is required to verify the private MediaRemote integration.
+
 The rootless package uses the same package identifier as the upstream build
 and can be installed over it. To rebuild the package on Linux, pass the
 official Beta 5-2 rootless `.deb` to
