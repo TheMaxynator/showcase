@@ -8,27 +8,11 @@ Author: Amine Rostane <amine.rostane@outlook.com>
 Depends: firmware (>= 12.0), uikittools, ldid
 Conflicts: ch.ringwald.btstack
 Replaces: ch.ringwald.btstack (<= 1.1-1)
-Homepage: https://github.com/amineross/showcase
+Homepage: https://github.com/TheMaxynator/showcase
 Icon: https://aminerostane.com/repo/icons/showcase.png
-Depiction: https://aminerostane.com/repo/depictions/cydia.html
-SileoDepiction: https://aminerostane.com/repo/depictions/sileo.json
-Description: Wireless CarPlay receiver for rootless jailbreaks.
- Showcase turns a jailbroken iPhone or iPad into a wireless CarPlay
- receiver. This package uses the rootless layout under /var/jb and supports
- iOS 12 or newer.
+Description: Wireless CarPlay receiver for rootless jailbreaks
+ This Showcase fork focuses on the iPhone 13 Pro running iOS 15.0.2 with
+ Dopamine. The package uses the rootless layout under /var/jb.
  .
- Beta 5-2 turns on Prioritize Quality once and adds anonymous usage
- reporting, which Settings > Anonymous Usage turns off item by item.
- .
- This fork saves settings across launches and adds Flip Landscape
- Orientation under Settings > Display.
- .
- The prefs2 test build starts CarPlay services on Bluetooth readiness,
- reassembles fragmented iAP2 traffic, and recovers a stale Bluetooth key
- for a known sender. Pairing progress follows actual pairing requests.
- .
- The prefs3 build uses one-sided notch padding, finishes drags outside
- the video area, and bounds recovery waits during relaunch.
- .
- The prefs4 test build adds local Spotify controls to the three-finger
- menu during CarPlay.
+ The first release includes persistent settings, reversed landscape,
+ notch clearance, edge touch handling, and connection recovery fixes.

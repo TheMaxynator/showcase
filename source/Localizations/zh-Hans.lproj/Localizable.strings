@@ -3,13 +3,6 @@
 "Wi-Fi network is required." = "需要 Wi-Fi 网络。";
 "Wi-Fi name must be at least 6 characters. iOS rejects shorter names for CarPlay." = "Wi-Fi 名称至少需要 6 个字符。iOS 不接受更短的 CarPlay 网络名称。";
 "Wi-Fi name cannot contain \"%@\". Rename this %@ in Settings › General › About › Name." = "Wi-Fi 名称不能包含“%@”。请在“设置 › 通用 › 关于本机 › 名称”中重命名这台 %@。";
-"Play or Pause" = "播放或暂停";
-"Previous Track" = "上一首";
-"Next Track" = "下一首";
-"Local Spotify" = "本机 Spotify";
-"Start playback in Spotify on this device." = "请在本机打开 Spotify 并开始播放。";
-"Local playback controls unavailable." = "本机播放控制不可用。";
-"Waiting for Spotify track information…" = "正在等待 Spotify 曲目信息…";
 "Copy Diagnostic" = "拷贝诊断信息";
 "Close" = "关闭";
 "Copied" = "已拷贝";

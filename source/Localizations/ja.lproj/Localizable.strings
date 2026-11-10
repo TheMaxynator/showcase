@@ -3,13 +3,6 @@
 "Wi-Fi network is required." = "Wi-Fiネットワークが必要です。";
 "Wi-Fi name must be at least 6 characters. iOS rejects shorter names for CarPlay." = "Wi-Fi名は6文字以上にしてください。iOSはそれより短い名前をCarPlayで受け付けません。";
 "Wi-Fi name cannot contain \"%@\". Rename this %@ in Settings › General › About › Name." = "Wi-Fi名に「%@」は使えません。「設定 › 一般 › 情報 › 名前」でこの%@の名前を変更してください。";
-"Play or Pause" = "再生または一時停止";
-"Previous Track" = "前の曲";
-"Next Track" = "次の曲";
-"Local Spotify" = "この端末の Spotify";
-"Start playback in Spotify on this device." = "この端末の Spotify で再生を開始してください。";
-"Local playback controls unavailable." = "この端末の再生操作は利用できません。";
-"Waiting for Spotify track information…" = "Spotify の曲情報を待っています…";
 "Copy Diagnostic" = "診断情報をコピー";
 "Close" = "閉じる";
 "Copied" = "コピーしました";
