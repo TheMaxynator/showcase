@@ -79,6 +79,7 @@ COPYFILE_DISABLE=1 tar --format ustar -C "$SRC" \
     -cf /tmp/showcase-crypto-vendor.tar vendor Localizations
 scp_cmd "$SRC/Showcase.m" \
         "$SRC/carplay_bt.m" \
+        "$SRC/iap2_stream.h" \
         "$SRC/carplay_services.m" \
         "$SRC/carplay_pair.c" \
         "$SRC/carplay_pair.h" \

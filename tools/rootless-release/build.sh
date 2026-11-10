@@ -90,7 +90,7 @@ DPKG_DEB=$(find_tool /var/jb/usr/bin/dpkg-deb /usr/bin/dpkg-deb) || fail "dpkg-d
 SDK=$(find_sdk) || fail "The iPhoneOS SDK was not found."
 
 for REQUIRED in \
-    Showcase.m carplay_bt.m carplay_services.m carplay_pair.c carplay_pair.h \
+    Showcase.m carplay_bt.m iap2_stream.h carplay_services.m carplay_pair.c carplay_pair.h \
     baa_broker.h Info.plist ent_app.xml ent_bt.xml ent_svc.xml \
     ent_btdaemon.xml libBTstack.dylib ch.ringwald.BTstack.plist \
     control postinst prerm postrm
