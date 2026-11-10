@@ -544,8 +544,10 @@ static int run_baa_broker(void) {
             if (errno == EINTR) continue;
             break;
         }
-        @autoreleasepool {
-            baa_broker_handle_client(client);
+        if (baa_socket_timeout(client)) {
+            @autoreleasepool {
+                baa_broker_handle_client(client);
+            }
         }
         close(client);
     }

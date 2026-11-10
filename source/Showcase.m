@@ -32,6 +32,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <time.h>
 #include <stdlib.h>
@@ -857,9 +858,36 @@ typedef struct {
 
 static const char *first_existing_tool(const char *const paths[]);
 
+static void reap_child(void *context) {
+    pid_t pid = (pid_t)(intptr_t)context;
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+}
+
+static int wait_child_bounded(pid_t pid, uint64_t deadline) {
+    int status = 0;
+    for (;;) {
+        pid_t result = waitpid(pid, &status, WNOHANG);
+        if (result == pid) return status;
+        if (result < 0 && errno != EINTR) return -1;
+        if (monotonic_nanos_now() >= deadline) break;
+        usleep(10000);
+    }
+    kill(pid, SIGKILL);
+    /* Reap even if the child takes time to exit after SIGKILL. */
+    dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
+                     (void *)(intptr_t)pid, reap_child);
+    errno = ETIMEDOUT;
+    return -1;
+}
+
 static NSData *capture_process_output(const char *path, char *const argv[]) {
     int pipes[2];
     if (!path || pipe(pipes) != 0) return nil;
+    if (fcntl(pipes[1], F_SETFD, FD_CLOEXEC) < 0) {
+        close(pipes[0]);
+        close(pipes[1]);
+        return nil;
+    }
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -880,20 +908,33 @@ static NSData *capture_process_output(const char *path, char *const argv[]) {
 
     NSMutableData *output = [NSMutableData data];
     uint8_t buffer[8192];
+    uint64_t deadline = monotonic_nanos_now() + 5ULL * NSEC_PER_SEC;
+    BOOL success = NO;
     for (;;) {
+        uint64_t now = monotonic_nanos_now();
+        if (now >= deadline) break;
+        int milliseconds = (int)((deadline - now + NSEC_PER_MSEC - 1) / NSEC_PER_MSEC);
+        struct pollfd ready = { .fd = pipes[0], .events = POLLIN };
+        int result = poll(&ready, 1, milliseconds);
+        if (result < 0 && errno == EINTR) continue;
+        if (result <= 0) break;
+
         ssize_t count = read(pipes[0], buffer, sizeof(buffer));
         if (count > 0) {
+            if (output.length + (NSUInteger)count > 16 * 1024 * 1024) break;
             [output appendBytes:buffer length:(NSUInteger)count];
         } else if (count < 0 && errno == EINTR) {
             continue;
         } else {
+            success = (count == 0);
             break;
         }
     }
     close(pipes[0]);
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    return output;
+    if (!success) kill(pid, SIGKILL);
+    int status = wait_child_bounded(pid, deadline);
+    return success && status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0
+        ? output : nil;
 }
 
 static NSString *wlan_ioreg_snapshot(BOOL fullTree) {
@@ -1273,8 +1314,7 @@ static CarPlayVideoSize carplay_select_video(double nativeLong, double nativeSho
 }
 /* END display selector */
 
-/* The receiver's screen and capability. The Wi-Fi bus probe runs ioreg, so
- * the answer is kept for the life of the app. */
+/* Cache the UIKit snapshot on the main thread, separately from the Wi-Fi probe. */
 typedef struct {
     double nativeLong, nativeShort;
     uint64_t memory;
@@ -1282,6 +1322,8 @@ typedef struct {
     uint16_t screenFPS, defaultFPS;
     CarPlayWLANAttachment wlanAttachment;
 } CarPlayDisplayHardware;
+
+static int g_display_wlan_attachment = CarPlayWLANAttachmentUnknown;
 
 static CarPlayDisplayHardware carplay_display_hardware(void) {
     static CarPlayDisplayHardware hardware;
@@ -1300,12 +1342,13 @@ static CarPlayDisplayHardware carplay_display_hardware(void) {
         NSInteger screenFPS = [screen respondsToSelector:@selector(maximumFramesPerSecond)]
             ? screen.maximumFramesPerSecond : 60;
         hardware.screenFPS = (uint16_t)MAX(30, MIN(screenFPS, 60));
-        hardware.wlanAttachment = wlan_attachment_class();
-        /* HSIC-attached Wi-Fi drops bursts; 30 fps halves them. */
-        hardware.defaultFPS = hardware.wlanAttachment == CarPlayWLANAttachmentHSIC
-            ? 30 : hardware.screenFPS;
     });
-    return hardware;
+    CarPlayDisplayHardware snapshot = hardware;
+    snapshot.wlanAttachment = __atomic_load_n(&g_display_wlan_attachment, __ATOMIC_RELAXED);
+    /* HSIC-attached Wi-Fi drops bursts; 30 fps halves them. */
+    snapshot.defaultFPS = snapshot.wlanAttachment == CarPlayWLANAttachmentHSIC
+        ? 30 : snapshot.screenFPS;
+    return snapshot;
 }
 
 static CarPlayVideoPriority carplay_video_priority(void) {
@@ -1617,10 +1660,9 @@ static dispatch_queue_t touch_write_queue(void) {
 }
 
 static void send_ipc_payload(uint8_t type, const void *payload,
-                             uint32_t payloadLength) {
+                             uint32_t payloadLength, uint32_t epoch) {
     int fd = g_touch_fd;
-    uint32_t epoch = g_touch_epoch;
-    if (fd < 0) return;
+    if (fd < 0 || g_touch_epoch != epoch) return;
 
     NSMutableData *message =
         [NSMutableData dataWithLength:(NSUInteger)payloadLength + 5];
@@ -1654,19 +1696,19 @@ static void send_ipc_payload(uint8_t type, const void *payload,
  * touch HID report has no timestamp field. Keeping it in IPC makes ordering
  * measurable and leaves the transport ready for a richer HID descriptor.
  * [phase][contact][x LE16][y LE16][timestampNs LE64] */
-static void send_touch_records(NSData *records) {
+static void send_touch_records(NSData *records, uint32_t epoch) {
     if (records.length == 0 || records.length > UINT32_MAX) return;
-    send_ipc_payload(MSG_TOUCH, records.bytes, (uint32_t)records.length);
+    send_ipc_payload(MSG_TOUCH, records.bytes, (uint32_t)records.length, epoch);
 }
 
 static void send_app_visibility(uint8_t visible) {
     uint8_t payload = visible ? 1 : 0;
-    send_ipc_payload(MSG_APP_VISIBILITY, &payload, sizeof(payload));
+    send_ipc_payload(MSG_APP_VISIBILITY, &payload, sizeof(payload), g_touch_epoch);
 }
 
 static void send_video_resync_request(void) {
     uint8_t payload = 1;
-    send_ipc_payload(MSG_VIDEO_RESYNC, &payload, sizeof(payload));
+    send_ipc_payload(MSG_VIDEO_RESYNC, &payload, sizeof(payload), g_touch_epoch);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1858,7 +1900,8 @@ static int run_blocking(const char *path, char *const argv[]) {
     int err = posix_spawn(&pid, path, &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions);
     if (err != 0) { ip_log("  posix_spawn FAIL: %s", strerror(err)); return -1; }
-    if (waitpid(pid, &status, 0) < 0) { ip_log("  waitpid FAIL: %s", strerror(errno)); return -1; }
+    status = wait_child_bounded(pid, monotonic_nanos_now() + 20ULL * NSEC_PER_SEC);
+    if (status < 0) { ip_log("  command wait failed: %s", strerror(errno)); return -1; }
     int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     ip_log("  exit=%d", rc);
     return rc;
@@ -2726,7 +2769,7 @@ static OSStatus carplay_aac_input_callback(
     memcpy(payload, &_streamType, 4);
     memcpy(payload + 4, &sampleTime, 8);
     memcpy(payload + 12, &hostTicks, 8);
-    send_ipc_payload(MSG_AUDIO_RENDER, payload, sizeof(payload));
+    send_ipc_payload(MSG_AUDIO_RENDER, payload, sizeof(payload), g_touch_epoch);
     _lastRenderReportNanos = nowNanos;
 
     if (discontinuity) {
@@ -3034,14 +3077,45 @@ static UIEdgeInsets showcase_safe_insets(UIView *view);
 
 @class AppDelegate;
 
+/* BEGIN CarPlay touch geometry */
+static bool map_carplay_touch(double viewWidth, double viewHeight,
+                              double width, double height, double x, double y,
+                              bool clamp, uint16_t *outX, uint16_t *outY) {
+    if (!(viewWidth > 0 && viewHeight > 0 && width > 0 && height > 0 &&
+          width <= UINT16_MAX && height <= UINT16_MAX)) return false;
+    double scale = fmin(viewWidth / width, viewHeight / height);
+    double imageWidth = width * scale, imageHeight = height * scale;
+    double nx = (x - (viewWidth - imageWidth) / 2.0) / imageWidth;
+    double ny = (y - (viewHeight - imageHeight) / 2.0) / imageHeight;
+    if (!isfinite(nx) || !isfinite(ny)) return false;
+    if (!clamp && (nx < 0 || nx > 1 || ny < 0 || ny > 1)) return false;
+    *outX = (uint16_t)(fmax(0, fmin(1, nx)) * width);
+    *outY = (uint16_t)(fmax(0, fmin(1, ny)) * height);
+    return true;
+}
+/* END CarPlay touch geometry */
+
+static void append_touch_record(NSMutableData *records, uint8_t phase,
+                                uint8_t contact, uint16_t x, uint16_t y,
+                                uint64_t timestampNs) {
+    uint8_t record[14] = { phase, contact, x & 0xff, x >> 8, y & 0xff, y >> 8 };
+    memcpy(record + 6, &timestampNs, sizeof(timestampNs));
+    [records appendBytes:record length:sizeof(record)];
+}
+
 @interface RootViewController : UIViewController
 @property (nonatomic, strong) UIView *contentView;
 @property (nonatomic, weak) VideoView *videoView;
 @property (nonatomic, weak) AppDelegate *appDelegate;
 @property (nonatomic, assign) BOOL fullscreenMode; /* iPhone Active bypass of the 1024x768 canvas */
+- (void)cancelCarPlayTouch;
 @end
 
-@implementation RootViewController
+@implementation RootViewController {
+    UITouch *_activeTouch;
+    uint32_t _touchEpoch;
+    uint16_t _touchX, _touchY;
+}
 - (void)loadView {
     UIView *root = [[UIView alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     root.backgroundColor = [UIColor blackColor];
@@ -3055,12 +3129,13 @@ static UIEdgeInsets showcase_safe_insets(UIView *view);
         self.contentView.frame = self.view.bounds;
         self.contentView.transform = CGAffineTransformIdentity;
         CGRect videoFrame = self.view.bounds;
-        if (showcase_phone_has_landscape_cutout() && [showcase_preferences() boolForKey:FLIP_LANDSCAPE_KEY]) {
-            /* Keep CarPlay's left-side controls clear of the notch. Touches
-             * are mapped in videoView coordinates, including these insets. */
+        if (showcase_phone_has_landscape_cutout()) {
             UIEdgeInsets safe = showcase_safe_insets(self.view);
-            videoFrame = UIEdgeInsetsInsetRect(videoFrame, UIEdgeInsetsMake(0, safe.left, 0, safe.right));
+            BOOL notchOnLeft = showcase_preferred_orientation() == UIInterfaceOrientationLandscapeRight;
+            videoFrame = UIEdgeInsetsInsetRect(videoFrame,
+                UIEdgeInsetsMake(0, notchOnLeft ? safe.left : 0, 0, notchOnLeft ? 0 : safe.right));
         }
+        if (!CGRectEqualToRect(self.videoView.frame, videoFrame)) [self cancelCarPlayTouch];
         self.videoView.frame = videoFrame;
         return;
     }
@@ -3081,6 +3156,13 @@ static UIEdgeInsets showcase_safe_insets(UIView *view);
     self.contentView.transform = CGAffineTransformMakeScale(scale, scale);
 }
 
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 110000
+- (void)viewSafeAreaInsetsDidChange {
+    [super viewSafeAreaInsetsDidChange];
+    [self.view setNeedsLayout];
+}
+#endif
+
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return showcase_orientation_mask();
@@ -3090,27 +3172,29 @@ static UIEdgeInsets showcase_safe_insets(UIView *view);
     return showcase_preferred_orientation();
 }
 
-- (BOOL)mapTouch:(UITouch *)touch toX:(uint16_t *)outX y:(uint16_t *)outY {
-    if (g_carplay_w <= 0 || g_carplay_h <= 0) return NO;
-    CGPoint pt = [touch locationInView:self.videoView];
-    CGSize vs = self.videoView.bounds.size;
-    float vw = vs.width, vh = vs.height;
-    float cw = g_carplay_w, ch = g_carplay_h;
-    float va = cw / ch, vva = vw / vh;
-    float rw, rh, rx, ry;
-    if (va > vva) { rw = vw; rh = vw / va; rx = 0; ry = (vh - rh) / 2.0f; }
-    else          { rh = vh; rw = vh * va; rx = (vw - rw) / 2.0f; ry = 0; }
-    float nx = (pt.x - rx) / rw, ny = (pt.y - ry) / rh;
-    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return NO;
-    *outX = (uint16_t)(nx * cw);
-    *outY = (uint16_t)(ny * ch);
-    return YES;
+- (void)cancelCarPlayTouch {
+    if (!_activeTouch) return;
+    NSMutableData *records = [NSMutableData data];
+    append_touch_record(records, TOUCH_CANCEL, (uint8_t)(_activeTouch.hash & 0xff),
+                        _touchX, _touchY, monotonic_nanos_now());
+    send_touch_records(records, _touchEpoch);
+    _activeTouch = nil;
 }
+
 - (void)handleTouches:(NSSet<UITouch *> *)touches
                 event:(UIEvent *)event
                 phase:(uint8_t)phase {
+    uint32_t epoch = g_touch_epoch;
+    if (_touchEpoch != epoch || g_touch_fd < 0) _activeTouch = nil;
+    if (g_touch_fd < 0) return;
+
+    BOOL beginning = (phase == TOUCH_DOWN);
+    BOOL ending = (phase == TOUCH_UP || phase == TOUCH_CANCEL);
     NSMutableData *records = [NSMutableData data];
     for (UITouch *touch in touches) {
+        /* The receiver sends single-touch HID reports. A touch that began in
+         * a black margin must not become a drag when it enters the video. */
+        if (beginning ? _activeTouch != nil : touch != _activeTouch) continue;
         NSArray<UITouch *> *samples = nil;
         if (phase == TOUCH_MOVE) {
             samples = [event coalescedTouchesForTouch:touch];
@@ -3118,21 +3202,27 @@ static UIEdgeInsets showcase_safe_insets(UIView *view);
         if (samples.count == 0) samples = @[touch];
 
         uint8_t contact = (uint8_t)(touch.hash & 0xff);
+        CGSize bounds = self.videoView.bounds.size;
+        float width = g_carplay_w, height = g_carplay_h;
         for (UITouch *sample in samples) {
-            uint16_t x = 0, y = 0;
-            if (![self mapTouch:sample toX:&x y:&y]) continue;
+            CGPoint point = [sample locationInView:self.videoView];
+            uint16_t x = _touchX, y = _touchY;
+            BOOL mapped = map_carplay_touch(bounds.width, bounds.height, width, height,
+                                            point.x, point.y, !beginning, &x, &y);
+            if (!mapped && !ending) continue;
+            if (beginning) {
+                _activeTouch = touch;
+                _touchEpoch = epoch;
+            }
+            _touchX = x;
+            _touchY = y;
             uint64_t timestampNs =
                 (uint64_t)llround(sample.timestamp * (double)NSEC_PER_SEC);
-            uint8_t record[14] = { phase, contact };
-            record[2] = x & 0xff;
-            record[3] = x >> 8;
-            record[4] = y & 0xff;
-            record[5] = y >> 8;
-            memcpy(record + 6, &timestampNs, sizeof(timestampNs));
-            [records appendBytes:record length:sizeof(record)];
+            append_touch_record(records, phase, contact, x, y, timestampNs);
         }
+        if (ending) _activeTouch = nil;
     }
-    send_touch_records(records);
+    send_touch_records(records, epoch);
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e {
     [self handleTouches:t event:e phase:TOUCH_DOWN];
@@ -3559,8 +3649,10 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{ send_anonymous_usage(); });
     _diagnosticsEnabled = [showcase_preferences() boolForKey:DIAGNOSTICS_ENABLED_KEY];
-    /* Settings reads the display hardware; probe the Wi-Fi bus off the main thread now. */
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ carplay_display_hardware(); });
+    (void)carplay_display_hardware();
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        __atomic_store_n(&g_display_wlan_attachment, wlan_attachment_class(), __ATOMIC_RELAXED);
+    });
     /* A session that ended without stopFlow may have left a network paused. */
     dispatch_async(self.bgQueue, ^{
         stop_bluetooth_guard();
@@ -3638,7 +3730,8 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
     self.baaLoading = YES;
     self.baaError = nil;
     [self renderState];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    /* Finish launch recovery before the broker reaps old helpers. */
+    dispatch_async(self.bgQueue, ^{
         BOOL started = [self startBAABroker];
         dispatch_async(dispatch_get_main_queue(), ^{
             self.baaLoading = NO;
@@ -3722,7 +3815,8 @@ static pid_t reusable_baa_broker(void) {
         int rc = -1;
         uint8_t *leaf = NULL, *intermediate = NULL;
         int leafLength = 0, intermediateLength = 0;
-        for (int attempt = 0; attempt < 450; attempt++) {
+        uint64_t deadline = monotonic_nanos_now() + 45ULL * NSEC_PER_SEC;
+        while (monotonic_nanos_now() < deadline) {
             if (!pid_alive(self.baaBrokerPid)) {
                 rc = -1;
                 break;
@@ -3766,6 +3860,7 @@ static pid_t reusable_baa_broker(void) {
 
 - (void)handleBackground {
     if (self.state != StateIdle && self.state != StateStopping) {
+        [self.vc cancelCarPlayTouch];
         ip_log("backgrounded — preserving CarPlay session");
         g_video_suspended = 1;
         g_video_needs_resync = 1;
@@ -4090,6 +4185,7 @@ static pid_t reusable_baa_broker(void) {
     self.closeButton.hidden = YES;
     self.controlsGesture.enabled = (self.state == StateActive);
     if (self.state != StateActive) {
+        [self.vc cancelCarPlayTouch];
         /* Restore the 1024x768 canvas in every non-Active state. */
         if ([self isPhone] && self.vc.fullscreenMode) {
             self.vc.fullscreenMode = NO;
@@ -4949,11 +5045,11 @@ static pid_t reusable_baa_broker(void) {
     [self.discoveryTimer invalidate]; self.discoveryTimer = nil;
     [self transitionTo:StateStopping];
     dispatch_async(self.bgQueue, ^{
+        g_touch_fd = -1;
+        __sync_add_and_fetch(&g_touch_epoch, 1);
         if (self.clientFd >= 0) { close(self.clientFd); self.clientFd = -1; }
         if (self.listenFd >= 0) { close(self.listenFd); self.listenFd = -1; }
         unlink(SOCK_PATH);
-        g_touch_fd = -1;
-        __sync_add_and_fetch(&g_touch_epoch, 1);
         g_carplay_w = 0; g_carplay_h = 0;
         g_video_suspended = 0;
         g_video_needs_resync = 0;
@@ -5664,7 +5760,7 @@ static NSString *hotspot_name(void) {
         (char*)"tar", (char*)"-cf", (char*)[archive UTF8String],
         (char*)"-C", (char*)[work UTF8String], (char*)".", NULL
     };
-    int rc = run_blocking(tarPath, tarArgv);
+    int rc = run_capture(tarPath, tarArgv, "/dev/null");
     ip_log("diagnostics tar rc=%d path=%s", rc, [archive UTF8String]);
     return rc == 0 ? archive : nil;
 }

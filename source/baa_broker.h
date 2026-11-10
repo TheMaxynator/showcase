@@ -18,10 +18,14 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 
 #define BAA_BROKER_PATH          "/tmp/showcase_baa.sock"
+#define BAA_BROKER_TIMEOUT_SECONDS 2
 #define BAA_BROKER_MAGIC         "BAA3"
 #define BAA_BROKER_HEADER_SIZE   12
 #define BAA_BROKER_MAX_PAYLOAD   (64U * 1024U)
@@ -89,6 +93,13 @@ static inline void baa_make_header(uint8_t header[BAA_BROKER_HEADER_SIZE],
     baa_write_le32(header + 8, payloadLength);
 }
 
+/* Bound both ends so a stalled peer cannot block the next authentication. */
+static inline bool baa_socket_timeout(int fd) {
+    struct timeval timeout = { .tv_sec = BAA_BROKER_TIMEOUT_SECONDS };
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+           setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0;
+}
+
 static inline int baa_broker_connect(void) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -98,7 +109,21 @@ static inline int baa_broker_connect(void) {
     address.sun_family = AF_UNIX;
     strncpy(address.sun_path, BAA_BROKER_PATH,
             sizeof(address.sun_path) - 1);
-    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
+        return -1;
+    }
+    int result = connect(fd, (struct sockaddr *)&address, sizeof(address));
+    if (result < 0 && errno == EINPROGRESS) {
+        struct pollfd ready = { .fd = fd, .events = POLLOUT };
+        int error = 0;
+        socklen_t length = sizeof(error);
+        result = poll(&ready, 1, BAA_BROKER_TIMEOUT_SECONDS * 1000) > 0 &&
+                 getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
+                 error == 0 ? 0 : -1;
+    }
+    if (result < 0 || fcntl(fd, F_SETFL, flags) < 0 || !baa_socket_timeout(fd)) {
         close(fd);
         return -1;
     }

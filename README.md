@@ -17,6 +17,12 @@ The `prefs2` test build backports three connection changes from Showcase+.
 - Reassemble fragmented iAP2 packets and process every message in coalesced packets. [Showcase+ v1.4.1](https://github.com/mymolasses/showcase/commit/485aca7f4ecb754486352151e568b668181ef45a)
 - Retry pairing after a confirmed missing Bluetooth key on a known sender and show pairing progress when a pairing or authentication request arrives. [Showcase+ v1.4.2](https://github.com/mymolasses/showcase/commit/830d9132d7baa2451f9bb3b12fc90e9f14571102)
 
+The `prefs3` build adds the following native receiver changes.
+
+- Reserve room on the notch side only, using the selected landscape direction. [Showcase+ v1.4.0 display layout](https://github.com/mymolasses/showcase/commit/81f722cdd1af2857590fa9ccfcb4de2f3e155be5)
+- Finish a CarPlay drag at the edge when it ends outside the displayed image. [Showcase+ v1.4.0 touch handling](https://github.com/mymolasses/showcase/commit/3a8a772a7d951e4560e3887ea65c79d702f06cc8)
+- Keep Wi-Fi hardware detection off the UI thread and bound recovery waits for system commands and the authentication broker. [Showcase+ v1.3.3](https://github.com/mymolasses/showcase/commit/317549a221c68c90ca7b51536494d35d4ccfed20)
+
 The rootless package uses the same package identifier as the upstream build
 and can be installed over it. To rebuild the package on Linux, pass the
 official Beta 5-2 rootless `.deb` to
