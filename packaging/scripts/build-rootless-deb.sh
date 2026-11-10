@@ -91,6 +91,7 @@ fi
 need_file "$BTSTACK_PLIST"
 need_file "$REPO_ROOT/source/Showcase.m"
 need_file "$REPO_ROOT/source/carplay_bt.m"
+need_file "$REPO_ROOT/source/iap2_stream.h"
 need_file "$REPO_ROOT/source/carplay_services.m"
 need_file "$REPO_ROOT/source/carplay_pair.c"
 need_file "$REPO_ROOT/source/carplay_pair.h"
@@ -139,6 +140,7 @@ mkdir -p \
 
 cp "$REPO_ROOT/source/Showcase.m" \
    "$REPO_ROOT/source/carplay_bt.m" \
+   "$REPO_ROOT/source/iap2_stream.h" \
    "$REPO_ROOT/source/carplay_services.m" \
    "$REPO_ROOT/source/carplay_pair.c" \
    "$REPO_ROOT/source/carplay_pair.h" \

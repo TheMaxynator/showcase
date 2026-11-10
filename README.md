@@ -11,12 +11,18 @@ iPhone 13 Pro running iOS 15.0.2 and Dopamine in
 - Settings > Display > Flip Landscape Orientation selects the other landscape
   direction and remembers it across launches.
 
+The `prefs2` test build backports three connection changes from Showcase+.
+
+- Start the CarPlay network services as soon as the Bluetooth helper is ready. [Showcase+ v1.2.2](https://github.com/mymolasses/showcase/commit/d652ca5db33ddfe4c3d9560ff6f1f07f2c6325ea)
+- Reassemble fragmented iAP2 packets and process every message in coalesced packets. [Showcase+ v1.4.1](https://github.com/mymolasses/showcase/commit/485aca7f4ecb754486352151e568b668181ef45a)
+- Retry pairing after a confirmed missing Bluetooth key on a known sender and show pairing progress when a pairing or authentication request arrives. [Showcase+ v1.4.2](https://github.com/mymolasses/showcase/commit/830d9132d7baa2451f9bb3b12fc90e9f14571102)
+
 The rootless package uses the same package identifier as the upstream build
 and can be installed over it. To rebuild the package on Linux, pass the
 official Beta 5-2 rootless `.deb` to
-`packaging/scripts/rebuild-rootless-app-deb.sh` with an iPhoneOS 16 SDK,
-Clang, LLD, and ldid available. The script keeps the original Bluetooth and
-CarPlay helpers and compiles the application from this checkout.
+`bash packaging/scripts/rebuild-rootless-app-deb.sh` with an iPhoneOS 16 SDK,
+Clang, LLD, and ldid available. The script builds the app and both helpers
+from this checkout and uses the Bluetooth runtime from the official package.
 
 ## Updates
 

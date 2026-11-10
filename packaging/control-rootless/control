@@ -22,3 +22,7 @@ Description: Wireless CarPlay receiver for rootless jailbreaks.
  .
  This fork saves settings across launches and adds Flip Landscape
  Orientation under Settings > Display.
+ .
+ The prefs2 test build starts CarPlay services on Bluetooth readiness,
+ reassembles fragmented iAP2 traffic, and recovers a stale Bluetooth key
+ for a known sender. Pairing progress follows actual pairing requests.
