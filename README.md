@@ -1,5 +1,23 @@
 # Showcase
 
+## Preferences and landscape fork
+
+This fork is based on Beta 5-2 and targets the settings loss reported on an
+iPhone 13 Pro running iOS 15.0.2 and Dopamine in
+[issue #38](https://github.com/amineross/showcase/issues/38).
+
+- Settings are stored in a root-only directory and committed atomically.
+  Readable preferences from previous versions are imported on first use.
+- Settings > Display > Flip Landscape Orientation selects the other landscape
+  direction and remembers it across launches.
+
+The rootless package uses the same package identifier as the upstream build
+and can be installed over it. To rebuild the package on Linux, pass the
+official Beta 5-2 rootless `.deb` to
+`packaging/scripts/rebuild-rootless-app-deb.sh` with an iPhoneOS 16 SDK,
+Clang, LLD, and ldid available. The script keeps the original Bluetooth and
+CarPlay helpers and compiles the application from this checkout.
+
 ## Updates
 
 This repository contains the Showcase source. Install the packaged tweak from the Rostane source in Sileo.

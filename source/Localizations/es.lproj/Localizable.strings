@@ -48,6 +48,7 @@
 "This iPad's hotspot is called “%@”. Your iPhone joins the name you enter here, so it has to match. To use “%@”, rename the iPad in Settings > General > About > Name." = "El punto de acceso de este iPad se llama “%@”. Tu iPhone se conecta al nombre que introduzcas aquí, así que deben coincidir. Para usar “%@”, cambia el nombre del iPad en Ajustes > General > Información > Nombre.";
 "Use “%@”" = "Usar “%@”";
 "Keep" = "Mantener";
+"Could not save settings. Try again." = "No se pudieron guardar los ajustes. Inténtalo de nuevo.";
 "%@\n\nSaved to:\n%@" = "%@\n\nGuardado en:\n%@";
 "The share sheet could not be shown." = "No se ha podido mostrar la hoja para compartir.";
 "Export Saved" = "Exportación guardada";
@@ -93,6 +94,7 @@
 "Play Sound on This %@" = "Reproducir el sonido en este %@";
 "%u × %u at %u fps" = "%u × %u a %u fps";
 "Dock on the Right" = "Dock a la derecha";
+"Flip Landscape Orientation" = "Invertir la orientación horizontal";
 "Prioritize Quality" = "Priorizar la calidad";
 "Prioritize Performance" = "Priorizar el rendimiento";
 "Frame Rate" = "Frecuencia de fotogramas";

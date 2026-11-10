@@ -48,6 +48,7 @@
 "This iPad's hotspot is called “%@”. Your iPhone joins the name you enter here, so it has to match. To use “%@”, rename the iPad in Settings > General > About > Name." = "此 iPad 的热点名为“%@”。你的 iPhone 会加入你在此输入的名称，因此两者必须一致。若要使用“%@”，请在“设置 > 通用 > 关于本机 > 名称”中重命名 iPad。";
 "Use “%@”" = "使用“%@”";
 "Keep" = "保留";
+"Could not save settings. Try again." = "无法保存设置。请重试。";
 "%@\n\nSaved to:\n%@" = "%@\n\n已存储到：\n%@";
 "The share sheet could not be shown." = "无法显示共享表单。";
 "Export Saved" = "导出已存储";
@@ -93,6 +94,7 @@
 "Play Sound on This %@" = "在这台 %@ 上播放声音";
 "%u × %u at %u fps" = "%u × %u，%u 帧/秒";
 "Dock on the Right" = "程序坞在右侧";
+"Flip Landscape Orientation" = "反转横屏方向";
 "Prioritize Quality" = "画质优先";
 "Prioritize Performance" = "性能优先";
 "Frame Rate" = "帧率";

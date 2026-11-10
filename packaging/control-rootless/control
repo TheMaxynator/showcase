@@ -19,3 +19,6 @@ Description: Wireless CarPlay receiver for rootless jailbreaks.
  .
  Beta 5-2 turns on Prioritize Quality once and adds anonymous usage
  reporting, which Settings > Anonymous Usage turns off item by item.
+ .
+ This fork saves settings across launches and adds Flip Landscape
+ Orientation under Settings > Display.

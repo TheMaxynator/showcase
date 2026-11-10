@@ -205,6 +205,11 @@ T = {
         '已存储，但此 iPad 的热点名为“%@”。名称一致之前，你的 iPhone 无法加入。',
         '保存しましたが、このiPadのホットスポット名は「%@」です。名前が一致するまでiPhoneは接続できません。'),
     'Saved.': ('Enregistré.', 'Guardado.', '已存储。', '保存しました。'),
+    'Could not save settings. Try again.': (
+        'Impossible d’enregistrer les réglages. Réessayez.',
+        'No se pudieron guardar los ajustes. Inténtalo de nuevo.',
+        '无法保存设置。请重试。',
+        '設定を保存できませんでした。もう一度試してください。'),
     'Play Sound on This %@': (
         'Lire le son sur cet %@',
         'Reproducir el sonido en este %@',
@@ -212,6 +217,11 @@ T = {
         'この%@でサウンドを再生'),
     '%u × %u at %u fps': ('%u × %u à %u i/s', '%u × %u a %u fps', '%u × %u，%u 帧/秒', '%u × %u、%u fps'),
     'Dock on the Right': ('Dock à droite', 'Dock a la derecha', '程序坞在右侧', 'Dockを右側に表示'),
+    'Flip Landscape Orientation': (
+        'Inverser l’orientation paysage',
+        'Invertir la orientación horizontal',
+        '反转横屏方向',
+        '横向きの方向を反転'),
     'Prioritize Quality': ('Privilégier la qualité', 'Priorizar la calidad', '画质优先', '画質を優先'),
     'Prioritize Performance': (
         'Privilégier les performances',

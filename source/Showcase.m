@@ -48,6 +48,163 @@
 
 extern char **environ;
 
+/* The app switches to root before UIKit starts. Keep its preferences in a
+ * fixed, private location that does not depend on cfprefsd or the launcher's
+ * home directory. Hotspot credentials use the same store as the other settings. */
+static void ip_log(const char *fmt, ...);
+
+static NSDictionary *read_preferences_file(NSString *path) {
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) return nil;
+    id plist = [NSPropertyListSerialization propertyListWithData:data
+        options:NSPropertyListImmutable format:NULL error:NULL];
+    return [plist isKindOfClass:[NSDictionary class]] ? plist : nil;
+}
+
+static NSDictionary *legacy_showcase_preferences(void) {
+    NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
+    if (!bundleID.length) return @{};
+    NSDictionary *domain = [[NSUserDefaults standardUserDefaults] persistentDomainForName:bundleID];
+    if (domain.count) return domain;
+    NSString *relativePath = [NSString stringWithFormat:@"Library/Preferences/%@.plist", bundleID];
+    for (NSString *home in @[NSHomeDirectory(), @"/var/root", @"/var/mobile"]) {
+        domain = read_preferences_file([home stringByAppendingPathComponent:relativePath]);
+        if (domain.count) return domain;
+    }
+    return @{};
+}
+
+@interface ShowcasePreferences : NSObject {
+    NSString *_directory;
+    NSString *_path;
+    NSDictionary *_values;
+    NSDictionary *_defaults;
+    BOOL _hasFile;
+}
+- (instancetype)initWithDirectory:(NSString *)directory;
+- (void)registerDefaults:(NSDictionary *)defaults;
+- (id)objectForKey:(NSString *)key;
+- (NSString *)stringForKey:(NSString *)key;
+- (NSArray *)arrayForKey:(NSString *)key;
+- (BOOL)boolForKey:(NSString *)key;
+- (NSInteger)integerForKey:(NSString *)key;
+/* NSNull removes a key. Related values are committed together. */
+- (BOOL)applyChanges:(NSDictionary *)changes;
+- (BOOL)setObject:(id)value forKey:(NSString *)key;
+- (BOOL)setBool:(BOOL)value forKey:(NSString *)key;
+- (BOOL)setInteger:(NSInteger)value forKey:(NSString *)key;
+- (BOOL)removeObjectForKey:(NSString *)key;
+@end
+
+@implementation ShowcasePreferences
+- (instancetype)initWithDirectory:(NSString *)directory {
+    if ((self = [super init])) {
+        _directory = [directory copy];
+        _path = [_directory stringByAppendingPathComponent:@"Preferences.plist"];
+    }
+    return self;
+}
+
+/* Called under the store lock. Only import old preferences when the new file
+ * is absent, so a key removed after migration stays removed across launches. */
+- (BOOL)loadIfNeeded {
+    if (_values) return YES;
+    struct stat info;
+    [[NSFileManager defaultManager] createDirectoryAtPath:_directory withIntermediateDirectories:YES
+        attributes:@{NSFilePosixPermissions: @0700} error:NULL];
+    if (lstat(_directory.fileSystemRepresentation, &info) != 0 || !S_ISDIR(info.st_mode) ||
+        info.st_uid != geteuid() || (info.st_mode & 077) != 0) return NO;
+    if (lstat(_path.fileSystemRepresentation, &info) == 0) {
+        if (!S_ISREG(info.st_mode) || info.st_uid != geteuid()) return NO;
+        _values = read_preferences_file(_path);
+        _hasFile = _values != nil;
+    } else if (errno == ENOENT) {
+        _values = legacy_showcase_preferences();
+    }
+    return _values != nil;
+}
+
+- (void)registerDefaults:(NSDictionary *)defaults {
+    @synchronized (self) { _defaults = [defaults copy]; }
+}
+
+- (id)objectForKey:(NSString *)key {
+    @synchronized (self) {
+        [self loadIfNeeded];
+        return [_values objectForKey:key] ?: [_defaults objectForKey:key];
+    }
+}
+
+- (NSString *)stringForKey:(NSString *)key {
+    id value = [self objectForKey:key];
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+- (NSArray *)arrayForKey:(NSString *)key {
+    id value = [self objectForKey:key];
+    return [value isKindOfClass:[NSArray class]] ? value : nil;
+}
+
+- (BOOL)boolForKey:(NSString *)key {
+    id value = [self objectForKey:key];
+    return [value respondsToSelector:@selector(boolValue)] && [value boolValue];
+}
+
+- (NSInteger)integerForKey:(NSString *)key {
+    id value = [self objectForKey:key];
+    return [value respondsToSelector:@selector(integerValue)] ? [value integerValue] : 0;
+}
+
+- (BOOL)applyChanges:(NSDictionary *)changes {
+    @synchronized (self) {
+        if (![self loadIfNeeded]) {
+            ip_log("settings: could not read private preferences");
+            return NO;
+        }
+        NSMutableDictionary *updated = [_values mutableCopy];
+        for (NSString *key in changes) {
+            id value = [changes objectForKey:key];
+            if (value == [NSNull null]) [updated removeObjectForKey:key];
+            else [updated setObject:value forKey:key];
+        }
+        if (_hasFile && [updated isEqualToDictionary:_values]) return YES;
+
+        NSError *error = nil;
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:updated
+            format:NSPropertyListBinaryFormat_v1_0 options:0 error:&error];
+        if (!data || ![data writeToFile:_path options:NSDataWritingAtomic error:&error]) {
+            ip_log("settings: could not save private preferences (error=%ld)", (long)error.code);
+            return NO;
+        }
+        _values = [updated copy];
+        _hasFile = YES;
+        return YES;
+    }
+}
+
+- (BOOL)setObject:(id)value forKey:(NSString *)key {
+    return [self applyChanges:@{key: value}];
+}
+- (BOOL)setBool:(BOOL)value forKey:(NSString *)key {
+    return [self setObject:@(value) forKey:key];
+}
+- (BOOL)setInteger:(NSInteger)value forKey:(NSString *)key {
+    return [self setObject:@(value) forKey:key];
+}
+- (BOOL)removeObjectForKey:(NSString *)key {
+    return [self setObject:[NSNull null] forKey:key];
+}
+@end
+
+static ShowcasePreferences *showcase_preferences(void) {
+    static ShowcasePreferences *preferences;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        preferences = [[ShowcasePreferences alloc] initWithDirectory:@"/var/root/Library/ShowcaseSettings"];
+    });
+    return preferences;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  * Languages
  *
@@ -90,7 +247,7 @@ static BOOL g_language_loaded;
 
 /* The chosen language, or nil to follow the device. */
 static NSString *showcase_chosen_language(void) {
-    NSString *chosen = [[NSUserDefaults standardUserDefaults] stringForKey:LANGUAGE_KEY];
+    NSString *chosen = [showcase_preferences() stringForKey:LANGUAGE_KEY];
     return [showcase_languages() containsObject:chosen] ? chosen : nil;
 }
 
@@ -98,12 +255,10 @@ static NSString *showcase_language(void) {
     return showcase_chosen_language() ?: showcase_device_language();
 }
 
-static void showcase_set_language(NSString *language) {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    if (language) [d setObject:language forKey:LANGUAGE_KEY];
-    else [d removeObjectForKey:LANGUAGE_KEY];
-    [d synchronize];
+static BOOL showcase_set_language(NSString *language) {
+    if (![showcase_preferences() setObject:language ?: (id)[NSNull null] forKey:LANGUAGE_KEY]) return NO;
     g_language_loaded = NO;
+    return YES;
 }
 
 static NSString *L(NSString *english) {
@@ -129,6 +284,7 @@ static NSString *L(NSString *english) {
 #define DIAGNOSTICS_ENABLED_KEY @"diagnosticsEnabled"
 #define RECEIVER_AUDIO_KEY      @"receiverAudioEnabled"
 #define RIGHT_HAND_DRIVE_KEY    @"rightHandDriveDock"
+#define FLIP_LANDSCAPE_KEY      @"flipLandscape"
 #define SMOOTH_VIDEO_KEY        @"preferSmoothVideo"
 #define QUALITY_VIDEO_KEY       @"prioritizeVideoQuality"
 #define VIDEO_WIDTH_KEY         @"videoWidth"
@@ -137,7 +293,6 @@ static NSString *L(NSString *english) {
 #define AUTO_START_KEY          @"startCarPlayOnLaunch"
 #define DEDICATED_RADIO_KEY     @"leaveOtherWiFiDuringCarPlay"
 #define HELD_WIFI_NETWORK_KEY   @"heldWiFiNetworkSSID"
-#define HOTSPOT_OWNED_KEY       @"hotspotStartedByShowcase"
 /* Beta 6 turns Prioritize Quality on once; later choices are kept. */
 #define QUALITY_DEFAULT_SET_KEY @"qualityDefaultApplied"
 #define USAGE_KEY               @"anonymousUsageEnabled"
@@ -1154,7 +1309,7 @@ static CarPlayDisplayHardware carplay_display_hardware(void) {
 }
 
 static CarPlayVideoPriority carplay_video_priority(void) {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    ShowcasePreferences *d = showcase_preferences();
     if ([d boolForKey:QUALITY_VIDEO_KEY]) return CarPlayVideoQuality;
     if ([d boolForKey:SMOOTH_VIDEO_KEY]) return CarPlayVideoPerformance;
     return CarPlayVideoCustom;
@@ -1169,7 +1324,7 @@ static unsigned carplay_offered_resolutions(CarPlayVideoSize out[CARPLAY_MAX_OPT
 
 static CarPlayDisplayProfile preferred_carplay_display_profile(void) {
     CarPlayDisplayHardware h = carplay_display_hardware();
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    ShowcasePreferences *d = showcase_preferences();
     CarPlayVideoSize chosen = {
         (uint16_t)[d integerForKey:VIDEO_WIDTH_KEY], (uint16_t)[d integerForKey:VIDEO_HEIGHT_KEY]};
     uint16_t fps = 0;
@@ -1260,10 +1415,7 @@ static NSString *showcase_hold_other_wifi(void) {
     if (network) {
         CFStringRef name = ssidOf(network);
         ssid = name ? [(__bridge NSString *)name copy] : nil;
-        if (ssid.length) {
-            [[NSUserDefaults standardUserDefaults] setObject:ssid
-                                                      forKey:HELD_WIFI_NETWORK_KEY];
-            [[NSUserDefaults standardUserDefaults] synchronize];
+        if (ssid.length && [showcase_preferences() setObject:ssid forKey:HELD_WIFI_NETWORK_KEY]) {
             disable(manager, network);
             int rc = disassociate(device);
             ip_log("[RADIO] left '%s' for the session (disassociate rc=%d)",
@@ -1278,7 +1430,7 @@ static NSString *showcase_hold_other_wifi(void) {
 }
 
 static void showcase_release_other_wifi(const char *reason) {
-    NSString *ssid = [[NSUserDefaults standardUserDefaults]
+    NSString *ssid = [showcase_preferences()
         stringForKey:HELD_WIFI_NETWORK_KEY];
     if (!ssid.length) return;
     void *manager = showcase_wifi_manager();
@@ -1303,8 +1455,7 @@ static void showcase_release_other_wifi(const char *reason) {
     }
     ip_log("[RADIO] %s '%s' (%s)", restored ? "re-enabled" : "could not find",
            ssid.UTF8String, reason);
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:HELD_WIFI_NETWORK_KEY];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    [showcase_preferences() removeObjectForKey:HELD_WIFI_NETWORK_KEY];
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1364,7 +1515,7 @@ static NSDictionary *usage_values(void) {
 }
 
 static void send_anonymous_usage(void) {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    ShowcasePreferences *d = showcase_preferences();
     if (![d boolForKey:USAGE_KEY]) return;
     NSDictionary *values = usage_values();
     NSMutableDictionary *payload = [NSMutableDictionary dictionary];
@@ -1380,7 +1531,7 @@ static void send_anonymous_usage(void) {
     NSString *identifier = [d stringForKey:USAGE_ID_KEY];
     if (!identifier.length) {
         identifier = [NSUUID UUID].UUIDString.lowercaseString;
-        [d setObject:identifier forKey:USAGE_ID_KEY];
+        if (![d setObject:identifier forKey:USAGE_ID_KEY]) return;
     }
     payload[@"id"] = identifier;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
@@ -1392,9 +1543,7 @@ static void send_anonymous_usage(void) {
     [[[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
             if (error || ((NSHTTPURLResponse *)response).statusCode != 204) return;
-            [d setObject:summary forKey:USAGE_SENT_KEY];
-            [d setObject:[NSDate date] forKey:USAGE_SENT_DATE_KEY];
-            [d synchronize];
+            [d applyChanges:@{USAGE_SENT_KEY: summary, USAGE_SENT_DATE_KEY: [NSDate date]}];
         }] resume];
 }
 
@@ -1930,7 +2079,7 @@ static void reap_stale_helpers(pid_t preservedPid) {
  *   Car        = { name }                — display label CarPlay advertises
  *   APCreds    = { ssid, password }       — global, set once, used by all cars
  *
- * NSUserDefaults schema:
+ * Preference schema:
  *   "cars"            => NSArray of NSDictionary { name }
  *   "selectedCarName" => NSString
  *   "apSSID"          => NSString          (the iPad's hotspot SSID)
@@ -1988,12 +2137,12 @@ static NSString *validateSSID(NSString *ssid) {
 @property (nonatomic, copy)   NSString *apSSID;
 @property (nonatomic, copy)   NSString *apPassword;
 - (void)load;
-- (void)save;
-- (void)addCar:(Car *)car;
-- (void)deleteCarAtIndex:(NSInteger)idx;
-- (void)selectCar:(Car *)car;
+- (BOOL)save;
+- (BOOL)addCar:(Car *)car;
+- (BOOL)deleteCarAtIndex:(NSInteger)idx;
+- (BOOL)selectCar:(Car *)car;
 - (BOOL)apReady;
-- (void)setAPSSID:(NSString *)ssid password:(NSString *)pw;
+- (BOOL)setAPSSID:(NSString *)ssid password:(NSString *)pw;
 @end
 
 @implementation CarStore
@@ -2006,17 +2155,19 @@ static NSString *validateSSID(NSString *ssid) {
         && validateSSID(self.apSSID) == nil;
 }
 - (void)load {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    ShowcasePreferences *d = showcase_preferences();
     NSArray *raw = [d arrayForKey:@"cars"];
     self.cars = [NSMutableArray array];
     NSString *legacySSID = nil, *legacyPass = nil;
     for (NSDictionary *dict in raw) {
-        Car *c = [Car fromDict:dict];
-        [self.cars addObject:c];
+        if (![dict isKindOfClass:[NSDictionary class]]) continue;
+        if ([dict[@"name"] isKindOfClass:[NSString class]])
+            [self.cars addObject:[Car fromDict:dict]];
         /* Migration: capture first non-empty embedded creds */
         if (!legacySSID) {
             NSString *s = dict[@"ssid"], *p = dict[@"password"];
-            if (s.length > 0 && p.length > 0) { legacySSID = s; legacyPass = p; }
+            if ([s isKindOfClass:[NSString class]] && [p isKindOfClass:[NSString class]] &&
+                s.length > 0 && p.length > 0) { legacySSID = s; legacyPass = p; }
         }
     }
     if (self.cars.count == 0) {
@@ -2043,33 +2194,43 @@ static NSString *validateSSID(NSString *ssid) {
 
     [self save]; /* persist any migration */
 }
-- (void)save {
+- (BOOL)save {
     NSMutableArray *raw = [NSMutableArray array];
     for (Car *c in self.cars) [raw addObject:[c toDict]];
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    [d setObject:raw forKey:@"cars"];
-    [d setObject:(self.selected.name ?: @"") forKey:@"selectedCarName"];
-    [d setObject:(self.apSSID ?: @"")        forKey:@"apSSID"];
-    [d setObject:(self.apPassword ?: @"")    forKey:@"apPassword"];
-    [d synchronize];
+    return [showcase_preferences() applyChanges:@{
+        @"cars": raw, @"selectedCarName": self.selected.name ?: @"",
+        @"apSSID": self.apSSID ?: @"", @"apPassword": self.apPassword ?: @""
+    }];
 }
-- (void)addCar:(Car *)car {
+- (BOOL)addCar:(Car *)car {
     [self.cars addObject:car];
-    if (!self.selected) self.selected = car;
-    [self save];
+    if ([self selectCar:car]) return YES;
+    [self.cars removeLastObject];
+    return NO;
 }
-- (void)deleteCarAtIndex:(NSInteger)idx {
-    if (idx < 0 || idx >= (NSInteger)self.cars.count) return;
+- (BOOL)deleteCarAtIndex:(NSInteger)idx {
+    if (idx < 0 || idx >= (NSInteger)self.cars.count) return NO;
     Car *c = self.cars[idx];
     [self.cars removeObjectAtIndex:idx];
-    if (self.selected == c) self.selected = self.cars.firstObject;
-    [self save];
+    if ([self selectCar:self.selected == c ? self.cars.firstObject : self.selected]) return YES;
+    [self.cars insertObject:c atIndex:idx];
+    return NO;
 }
-- (void)selectCar:(Car *)car { self.selected = car; [self save]; }
-- (void)setAPSSID:(NSString *)ssid password:(NSString *)pw {
+- (BOOL)selectCar:(Car *)car {
+    Car *previous = self.selected;
+    self.selected = car;
+    if ([self save]) return YES;
+    self.selected = previous;
+    return NO;
+}
+- (BOOL)setAPSSID:(NSString *)ssid password:(NSString *)pw {
+    NSString *previousSSID = self.apSSID, *previousPassword = self.apPassword;
     self.apSSID = ssid ?: @"";
     self.apPassword = pw ?: @"";
-    [self save];
+    if ([self save]) return YES;
+    self.apSSID = previousSSID;
+    self.apPassword = previousPassword;
+    return NO;
 }
 @end
 
@@ -2761,16 +2922,20 @@ static NSString *showcase_device_noun(void) {
 }
 
 static UIInterfaceOrientationMask showcase_orientation_mask(void) {
+    if ([showcase_preferences() boolForKey:FLIP_LANDSCAPE_KEY])
+        return UIInterfaceOrientationMaskLandscapeRight;
     return showcase_phone_has_landscape_cutout()
         ? UIInterfaceOrientationMaskLandscapeLeft
         : UIInterfaceOrientationMaskLandscape;
 }
 
 static UIInterfaceOrientation showcase_preferred_orientation(void) {
-    return UIInterfaceOrientationLandscapeLeft;
+    return [showcase_preferences() boolForKey:FLIP_LANDSCAPE_KEY]
+        ? UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationLandscapeLeft;
 }
 
 static UIImage *showcase_star_image(CGFloat side);
+static UIEdgeInsets showcase_safe_insets(UIView *view);
 
 /* Asks for a GitHub star: the link, Copy Link and Open GitHub. Tapping
  * outside the panel closes it. */
@@ -2890,6 +3055,14 @@ static UIImage *showcase_star_image(CGFloat side);
     if (self.contentView == self.view) {
         self.contentView.frame = self.view.bounds;
         self.contentView.transform = CGAffineTransformIdentity;
+        CGRect videoFrame = self.view.bounds;
+        if (showcase_phone_has_landscape_cutout() && [showcase_preferences() boolForKey:FLIP_LANDSCAPE_KEY]) {
+            /* Keep CarPlay's left-side controls clear of the notch. Touches
+             * are mapped in videoView coordinates, including these insets. */
+            UIEdgeInsets safe = showcase_safe_insets(self.view);
+            videoFrame = UIEdgeInsetsInsetRect(videoFrame, UIEdgeInsetsMake(0, safe.left, 0, safe.right));
+        }
+        self.videoView.frame = videoFrame;
         return;
     }
 
@@ -3216,6 +3389,7 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
 
 /* Hotspot automation */
 @property (nonatomic, assign) BOOL hotspotManual;          /* fell back to Settings */
+@property (atomic, assign) BOOL hotspotStartedByShowcase;
 @property (nonatomic, assign) NSInteger hotspotAttempt;
 @property (nonatomic, strong) NSTimer *hotspotWatchdog;
 @property (nonatomic, strong) NSTimer *discoveryTimer;
@@ -3275,6 +3449,8 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
 
 /* Cars */
 @property (nonatomic, strong) CarStore *cars;
+- (void)applyLandscapeOrientation;
+- (void)presentSettingsSaveError;
 @end
 
 /* Forward: defined later */
@@ -3295,6 +3471,47 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
     (void)application;
     (void)window;
     return showcase_orientation_mask();
+}
+
+- (void)applyLandscapeOrientation {
+    UIInterfaceOrientation orientation = showcase_preferred_orientation();
+    [self.vc.view setNeedsLayout];
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 160000
+    /* Use Foundation's version check so cross-builds do not need the
+     * Apple Clang availability runtime. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+    if ([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){16, 0, 0}]) {
+        UIWindowScene *scene = self.window.windowScene;
+        if (scene) {
+            [self.vc setNeedsUpdateOfSupportedInterfaceOrientations];
+            if (self.vc.presentedViewController)
+                [[self topPresenter] setNeedsUpdateOfSupportedInterfaceOrientations];
+            if (scene.interfaceOrientation == orientation) return;
+            UIInterfaceOrientationMask mask = 1UL << orientation;
+            UIWindowSceneGeometryPreferencesIOS *geometry =
+                [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:mask];
+            [scene requestGeometryUpdateWithPreferences:geometry errorHandler:^(NSError *error) {
+                ip_log("settings: rotation request failed (error=%ld)", (long)error.code);
+            }];
+            return;
+        }
+    }
+#pragma clang diagnostic pop
+#endif
+    /* The legacy window lifecycle on iOS 15 has no scene geometry API.
+     * UIKit's interface constants already encode the inverse device direction. */
+    UIDevice *device = [UIDevice currentDevice];
+    SEL setOrientation = NSSelectorFromString(@"setOrientation:");
+    if ([device respondsToSelector:setOrientation])
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(device, setOrientation, orientation);
+    [UIViewController attemptRotationToDeviceOrientation];
+}
+
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+    (void)application;
+    if ([showcase_preferences() boolForKey:FLIP_LANDSCAPE_KEY])
+        [self applyLandscapeOrientation];
 }
 
 - (UIView *)rootContentView {
@@ -3327,18 +3544,22 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
         USAGE_KEY: @YES
     } mutableCopy];
     for (NSArray *item in usage_items()) defaults[item[0]] = @YES;
-    [[NSUserDefaults standardUserDefaults] registerDefaults:defaults];
-    /* Prioritize Quality becomes the default once, existing setups included. */
-    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    [showcase_preferences() registerDefaults:defaults];
+    /* Use the current default on first run, retaining explicit video choices
+     * from older builds that have not recorded this migration marker yet. */
+    ShowcasePreferences *prefs = showcase_preferences();
     if (![prefs boolForKey:QUALITY_DEFAULT_SET_KEY]) {
-        [prefs setBool:YES forKey:QUALITY_VIDEO_KEY];
-        [prefs setBool:NO forKey:SMOOTH_VIDEO_KEY];
-        [prefs setBool:YES forKey:QUALITY_DEFAULT_SET_KEY];
-        [prefs synchronize];
+        if ([prefs objectForKey:QUALITY_VIDEO_KEY] || [prefs objectForKey:SMOOTH_VIDEO_KEY] ||
+            [prefs objectForKey:VIDEO_WIDTH_KEY] || [prefs objectForKey:VIDEO_HEIGHT_KEY] ||
+            [prefs objectForKey:VIDEO_FPS_KEY]) {
+            [prefs setBool:YES forKey:QUALITY_DEFAULT_SET_KEY];
+        } else {
+            [prefs applyChanges:@{QUALITY_VIDEO_KEY: @YES, QUALITY_DEFAULT_SET_KEY: @YES}];
+        }
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{ send_anonymous_usage(); });
-    _diagnosticsEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:DIAGNOSTICS_ENABLED_KEY];
+    _diagnosticsEnabled = [showcase_preferences() boolForKey:DIAGNOSTICS_ENABLED_KEY];
     /* Settings reads the display hardware; probe the Wi-Fi bus off the main thread now. */
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ carplay_display_hardware(); });
     /* A session that ended without stopFlow may have left a network paused. */
@@ -4126,7 +4347,7 @@ static pid_t reusable_baa_broker(void) {
     /* Authentication may come later, after a retry; wait for it. */
     if (self.autoStartConsumed || !self.baaReady) return;
     self.autoStartConsumed = YES;
-    if (![[NSUserDefaults standardUserDefaults] boolForKey:AUTO_START_KEY]) return;
+    if (![showcase_preferences() boolForKey:AUTO_START_KEY]) return;
     if (self.state != StateIdle || !self.baaReady || ![self.cars apReady] ||
         self.cars.cars.count == 0 || self.vc.presentedViewController) {
         ip_log("auto start skipped: state=%ld baa=%d ap=%d presented=%d",
@@ -4160,10 +4381,10 @@ static pid_t reusable_baa_broker(void) {
                deviceName.UTF8String, self.cars.apSSID.UTF8String);
     self.bluetoothHandedOff = NO;
     [self resetConnectProgress];
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:DEDICATED_RADIO_KEY]) {
+    if ([showcase_preferences() boolForKey:DEDICATED_RADIO_KEY]) {
         dispatch_async(self.bgQueue, ^{ showcase_hold_other_wifi(); });
     }
-    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:HOTSPOT_OWNED_KEY];
+    self.hotspotStartedByShowcase = NO;
     self.hotspotManual = NO;
     self.hotspotAttempt = 0;
     [self.apPollTimer invalidate];
@@ -4187,11 +4408,8 @@ static pid_t reusable_baa_broker(void) {
             dispatch_async(dispatch_get_main_queue(), ^{ [self fallBackToManualHotspot]; });
             return;
         }
-        if (attempt == 0) {
-            /* Turn the hotspot off at stop only if Showcase turned it on. */
-            [[NSUserDefaults standardUserDefaults] setBool:(state != MIS_STATE_ON)
-                                                    forKey:HOTSPOT_OWNED_KEY];
-        }
+        /* Turn the hotspot off at stop only if Showcase turned it on. */
+        if (attempt == 0) self.hotspotStartedByShowcase = state != MIS_STATE_ON;
         if (state == MIS_STATE_ON && !is_ap_up()) {
             /* On but not advertising: start it fresh. */
             showcase_set_hotspot(NO);
@@ -4597,9 +4815,9 @@ static pid_t reusable_baa_broker(void) {
     char nameBuf[64];
     char widthBuf[16], heightBuf[16], fpsBuf[16], receiveBufferBuf[16];
     CarPlayVideoPriority priority = carplay_video_priority();
-    BOOL receiverAudio = [[NSUserDefaults standardUserDefaults]
+    BOOL receiverAudio = [showcase_preferences()
         boolForKey:RECEIVER_AUDIO_KEY];
-    BOOL rightHandDrive = [[NSUserDefaults standardUserDefaults]
+    BOOL rightHandDrive = [showcase_preferences()
         boolForKey:RIGHT_HAND_DRIVE_KEY];
     CarPlayDisplayProfile display =
         preferred_carplay_display_profile();
@@ -4757,10 +4975,10 @@ static pid_t reusable_baa_broker(void) {
         } else {
             ip_log("WARNING: launchctl not found while restoring bluetoothd");
         }
-        if ([[NSUserDefaults standardUserDefaults] boolForKey:HOTSPOT_OWNED_KEY]) {
+        if (self.hotspotStartedByShowcase) {
             showcase_set_hotspot_discovery(NO);
             showcase_set_hotspot(NO);
-            [[NSUserDefaults standardUserDefaults] removeObjectForKey:HOTSPOT_OWNED_KEY];
+            self.hotspotStartedByShowcase = NO;
             ip_log("[HOTSPOT] turned off the hotspot Showcase started");
         }
         showcase_release_other_wifi("CarPlay stopped");
@@ -4890,7 +5108,10 @@ static NSString *hotspot_name(void) {
 }
 
 - (void)saveSSID:(NSString *)ssid password:(NSString *)pass host:(UIViewController *)host {
-    [self.cars setAPSSID:ssid password:pass];
+    if (![self.cars setAPSSID:ssid password:pass]) {
+        [self presentSettingsSaveError];
+        return;
+    }
     [host dismissViewControllerAnimated:YES completion:^{ [self renderState]; }];
 }
 
@@ -4984,6 +5205,10 @@ static NSString *hotspot_name(void) {
     [[self topPresenter] presentViewController:ac animated:YES completion:nil];
 }
 
+- (void)presentSettingsSaveError {
+    [self presentAlertWithTitle:L(@"Settings") message:L(@"Could not save settings. Try again.")];
+}
+
 - (void)presentExportSavedAlertForPath:(NSString *)path reason:(NSString *)reason {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *msg = [NSString stringWithFormat:L(@"%@\n\nSaved to:\n%@"),
@@ -5052,10 +5277,9 @@ static NSString *hotspot_name(void) {
     });
 }
 
-- (void)applyDiagnosticsEnabled:(BOOL)enabled {
+- (BOOL)applyDiagnosticsEnabled:(BOOL)enabled {
+    if (![showcase_preferences() setBool:enabled forKey:DIAGNOSTICS_ENABLED_KEY]) return NO;
     _diagnosticsEnabled = enabled;
-    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:DIAGNOSTICS_ENABLED_KEY];
-    [[NSUserDefaults standardUserDefaults] synchronize];
     ip_log("diagnostics %s", enabled ? "enabled" : "disabled");
 
     if (enabled) {
@@ -5064,6 +5288,7 @@ static NSString *hotspot_name(void) {
         [self stopNetworkDumpCaptureWithReason:@"diagnostics disabled"];
         disable_btstack_hci_logging();
     }
+    return YES;
 }
 
 - (void)clearLogsAndDumps {
@@ -5085,9 +5310,8 @@ static NSString *hotspot_name(void) {
     for (NSString *path in paths) {
         [fm removeItemAtPath:path error:nil];
     }
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"latestTcpdumpPath"];
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"hasEverStartedTcpdump"];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    [showcase_preferences() applyChanges:@{@"latestTcpdumpPath": [NSNull null],
+                                          @"hasEverStartedTcpdump": [NSNull null]}];
 
     ip_log_open();
     ip_log("logs and dumps cleared");
@@ -5101,7 +5325,7 @@ static NSString *hotspot_name(void) {
 
 - (NSString *)latestNetworkDumpPath {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *stored = [[NSUserDefaults standardUserDefaults] stringForKey:@"latestTcpdumpPath"];
+    NSString *stored = [showcase_preferences() stringForKey:@"latestTcpdumpPath"];
     if (stored.length > 0 && [fm fileExistsAtPath:stored]) return stored;
 
     NSArray<NSString *> *files = [fm contentsOfDirectoryAtPath:@TCPDUMP_DIR error:nil];
@@ -5118,8 +5342,7 @@ static NSString *hotspot_name(void) {
         }
     }
     if (best) {
-        [[NSUserDefaults standardUserDefaults] setObject:best forKey:@"latestTcpdumpPath"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
+        [showcase_preferences() setObject:best forKey:@"latestTcpdumpPath"];
     }
     return best;
 }
@@ -5178,9 +5401,7 @@ static NSString *hotspot_name(void) {
 
     self.tcpdumpPid = pid;
     self.currentTcpdumpPath = pcapPath;
-    [[NSUserDefaults standardUserDefaults] setObject:pcapPath forKey:@"latestTcpdumpPath"];
-    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"hasEverStartedTcpdump"];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    [showcase_preferences() applyChanges:@{@"latestTcpdumpPath": pcapPath, @"hasEverStartedTcpdump": @YES}];
     ip_log("tcpdump running pid=%d path=%s", pid, [pcapPath UTF8String]);
     return YES;
 }
@@ -6289,6 +6510,7 @@ static UIEdgeInsets showcase_safe_insets(UIView *view) {
 @property (nonatomic, strong) UIView *header;
 @property (nonatomic, assign) BOOL wide;
 @property (nonatomic, assign) CGSize renderedSize;
+@property (nonatomic, assign) UIEdgeInsets renderedInsets;
 @property (nonatomic, assign) CGFloat keyboardOverlap;
 @property (nonatomic, weak) UITextField *activeField;
 
@@ -6340,7 +6562,8 @@ static BOOL g_settings_hardware_loading = NO;
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    if (!CGSizeEqualToSize(self.renderedSize, self.view.bounds.size)) {
+    if (!CGSizeEqualToSize(self.renderedSize, self.view.bounds.size) ||
+        !UIEdgeInsetsEqualToEdgeInsets(self.renderedInsets, showcase_safe_insets(self.view))) {
         BOOL wasEmpty = self.stack.count == 0;
         self.renderedSize = self.view.bounds.size;
         self.wide = self.view.bounds.size.width >= 900 &&
@@ -6456,6 +6679,7 @@ static BOOL g_settings_hardware_loading = NO;
 
 - (void)render {
     UIEdgeInsets safe = showcase_safe_insets(self.view);
+    self.renderedInsets = safe;
     CGFloat W = self.view.bounds.size.width;
     CGFloat H = self.view.bounds.size.height;
     BOOL phone = UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone;
@@ -6811,6 +7035,11 @@ static BOOL g_settings_hardware_loading = NO;
     [self render];
 }
 
+- (void)showSaveError {
+    [self render];
+    [self.appDelegate presentSettingsSaveError];
+}
+
 - (UIColor *)destructiveColor {
     return [UIColor colorWithRed:1.0 green:0.38 blue:0.35 alpha:1];
 }
@@ -6833,7 +7062,7 @@ static BOOL g_settings_hardware_loading = NO;
     AppDelegate *app = self.appDelegate;
     CGFloat w = b.width;
     __weak SettingsViewController *weakSelf = self;
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    ShowcasePreferences *d = showcase_preferences();
     BOOL receiverAudio = [d boolForKey:RECEIVER_AUDIO_KEY];
 
     [b card:^(SettingsCard *card) {
@@ -6865,7 +7094,7 @@ static BOOL g_settings_hardware_loading = NO;
             width:w selected:[selected isEqualToString:@"logs"]
             action:^{ [weakSelf selectSection:@"logs"]; }] height:52];
         [card addRow:[self navRow:L(@"Anonymous Usage")
-            value:[[NSUserDefaults standardUserDefaults] boolForKey:USAGE_KEY] ? L(@"On") : L(@"Off")
+            value:[showcase_preferences() boolForKey:USAGE_KEY] ? L(@"On") : L(@"Off")
             width:w selected:[selected isEqualToString:@"usage"]
             action:^{ [weakSelf selectSection:@"usage"]; }] height:52];
         [card addRow:[self navRow:L(@"About") value:@""
@@ -6893,7 +7122,7 @@ static BOOL g_settings_hardware_loading = NO;
             BOOL isSelected = car == app.cars.selected;
             SettingsRow *row = [[SettingsRow alloc] initWithFrame:CGRectMake(0, 0, w, 52)];
             row.action = ^{
-                [app.cars selectCar:car];
+                if (![app.cars selectCar:car]) { [weakSelf showSaveError]; return; }
                 [app renderState];
                 [weakSelf render];
             };
@@ -6947,7 +7176,7 @@ static BOOL g_settings_hardware_loading = NO;
     if (car && car != app.cars.selected) {
         [b card:^(SettingsCard *card) {
             [card addRow:[self actionRow:L(@"Use This Car") color:nil width:w enabled:YES action:^{
-                [app.cars selectCar:car];
+                if (![app.cars selectCar:car]) { [weakSelf showSaveError]; return; }
                 [app renderState];
                 [weakSelf pop];
             }] height:52];
@@ -6964,7 +7193,10 @@ static BOOL g_settings_hardware_loading = NO;
                     }
                     weakSelf.confirmingDestructive = NO;
                     NSInteger index = [app.cars.cars indexOfObject:car];
-                    if (index != NSNotFound) [app.cars deleteCarAtIndex:index];
+                    if (index != NSNotFound && ![app.cars deleteCarAtIndex:index]) {
+                        [weakSelf showSaveError];
+                        return;
+                    }
                     [app renderState];
                     [weakSelf pop];
                 }] height:52];
@@ -6992,15 +7224,17 @@ static BOOL g_settings_hardware_loading = NO;
     if (error) { [self setMessage:error error:YES]; return; }
     [self.view endEditing:YES];
     if (self.editingCar) {
-        BOOL wasSelected = self.editingCar == app.cars.selected;
+        NSString *previousName = self.editingCar.name;
         self.editingCar.name = name;
-        if (wasSelected) [app.cars selectCar:self.editingCar];
-        else [app.cars save];
+        if (![app.cars save]) {
+            self.editingCar.name = previousName;
+            [self showSaveError];
+            return;
+        }
     } else {
         Car *car = [[Car alloc] init];
         car.name = name;
-        [app.cars addCar:car];
-        [app.cars selectCar:car];
+        if (![app.cars addCar:car]) { [self showSaveError]; return; }
     }
     [app renderState];
     [self pop];
@@ -7062,7 +7296,10 @@ static BOOL g_settings_hardware_loading = NO;
         error = L(@"Hotspot passwords must be at least 8 characters.");
     [self.view endEditing:YES];
     if (error) { [self setMessage:error error:YES]; return; }
-    [app.cars setAPSSID:ssid password:pass];
+    if (![app.cars setAPSSID:ssid password:pass]) {
+        [self setMessage:L(@"Could not save settings. Try again.") error:YES];
+        return;
+    }
     [app renderState];
     NSString *deviceName = hotspot_name();
     if (deviceName && ![deviceName isEqualToString:ssid]) {
@@ -7077,10 +7314,12 @@ static BOOL g_settings_hardware_loading = NO;
 - (void)buildSound:(SettingsPageBuilder *)b {
     CGFloat w = b.width;
     __weak SettingsViewController *weakSelf = self;
-    BOOL receiverAudio = [[NSUserDefaults standardUserDefaults] boolForKey:RECEIVER_AUDIO_KEY];
+    BOOL receiverAudio = [showcase_preferences() boolForKey:RECEIVER_AUDIO_KEY];
     void (^choose)(BOOL) = ^(BOOL on) {
-        [[NSUserDefaults standardUserDefaults] setBool:on forKey:RECEIVER_AUDIO_KEY];
-        [[NSUserDefaults standardUserDefaults] synchronize];
+        if (![showcase_preferences() setBool:on forKey:RECEIVER_AUDIO_KEY]) {
+            [weakSelf showSaveError];
+            return;
+        }
         ip_log("settings: receiver audio %s", on ? "on" : "off");
         [weakSelf.soundRoute setReceiverActive:on animated:YES];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
@@ -7113,17 +7352,19 @@ static BOOL g_settings_hardware_loading = NO;
 
 - (void)buildDisplay:(SettingsPageBuilder *)b {
     CGFloat w = b.width;
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    ShowcasePreferences *d = showcase_preferences();
     __weak SettingsViewController *weakSelf = self;
     void (^setter)(NSString *, BOOL) = ^(NSString *key, BOOL on) {
-        [[NSUserDefaults standardUserDefaults] setBool:on forKey:key];
-        [[NSUserDefaults standardUserDefaults] synchronize];
+        if (![d setBool:on forKey:key]) { [weakSelf showSaveError]; return; }
         ip_log("settings: %s=%d", key.UTF8String, on ? 1 : 0);
     };
     /* At most one priority is on; either one sets resolution and rate. */
     void (^prioritize)(NSString *, NSString *, BOOL) = ^(NSString *key, NSString *other, BOOL on) {
-        setter(key, on);
-        if (on) setter(other, NO);
+        if (![d applyChanges:on ? @{key: @YES, other: @NO} : @{key: @NO}]) {
+            [weakSelf showSaveError];
+            return;
+        }
+        ip_log("settings: %s=%d", key.UTF8String, on ? 1 : 0);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ [weakSelf render]; });
     };
@@ -7137,6 +7378,12 @@ static BOOL g_settings_hardware_loading = NO;
             on:[d boolForKey:RIGHT_HAND_DRIVE_KEY] width:w
             changed:^(BOOL on) { setter(RIGHT_HAND_DRIVE_KEY, on); }];
         [card addRow:dock height:dock.bounds.size.height];
+        UIView *flip = [self switchRow:L(@"Flip Landscape Orientation") subtitle:nil
+            on:[d boolForKey:FLIP_LANDSCAPE_KEY] width:w changed:^(BOOL on) {
+                if (![d setBool:on forKey:FLIP_LANDSCAPE_KEY]) { [weakSelf showSaveError]; return; }
+                [weakSelf.appDelegate applyLandscapeOrientation];
+            }];
+        [card addRow:flip height:flip.bounds.size.height];
     }];
     [b card:^(SettingsCard *card) {
         UIView *quality = [self switchRow:L(@"Prioritize Quality") subtitle:nil
@@ -7159,8 +7406,10 @@ static BOOL g_settings_hardware_loading = NO;
         UIView *rate = [self segmentRow:L(@"Frame Rate") items:rates
             selected:profile.framesPerSecond >= 60 ? 1 : 0 width:w enabled:custom
             changed:^(NSInteger index) {
-                [[NSUserDefaults standardUserDefaults] setInteger:index ? 60 : 30 forKey:VIDEO_FPS_KEY];
-                [[NSUserDefaults standardUserDefaults] synchronize];
+                if (![d setInteger:index ? 60 : 30 forKey:VIDEO_FPS_KEY]) {
+                    [weakSelf showSaveError];
+                    return;
+                }
                 ip_log("settings: %s=%d", VIDEO_FPS_KEY.UTF8String, index ? 60 : 30);
             }];
         [card addRow:rate height:52];
@@ -7182,12 +7431,11 @@ static BOOL g_settings_hardware_loading = NO;
 /* Each item shows the value Showcase would send next to its switch. */
 - (void)buildUsage:(SettingsPageBuilder *)b {
     CGFloat w = b.width;
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    ShowcasePreferences *d = showcase_preferences();
     __weak SettingsViewController *weakSelf = self;
     BOOL enabled = [d boolForKey:USAGE_KEY];
     void (^set)(NSString *, BOOL) = ^(NSString *key, BOOL on) {
-        [[NSUserDefaults standardUserDefaults] setBool:on forKey:key];
-        [[NSUserDefaults standardUserDefaults] synchronize];
+        if (![d setBool:on forKey:key]) { [weakSelf showSaveError]; return; }
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{ send_anonymous_usage(); });
     };
     [b card:^(SettingsCard *card) {
@@ -7253,16 +7501,14 @@ static BOOL g_settings_hardware_loading = NO;
             BOOL checked = size.width == profile.width && size.height == profile.height;
             [card addRow:[self choiceRow:[self sizeText:size] value:isDefault ? L(@"Default") : @""
                 checked:checked width:w action:^{
-                    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
                     /* The default follows the hardware; only another size is kept. */
-                    if (isDefault) {
-                        [d removeObjectForKey:VIDEO_WIDTH_KEY];
-                        [d removeObjectForKey:VIDEO_HEIGHT_KEY];
-                    } else {
-                        [d setInteger:size.width forKey:VIDEO_WIDTH_KEY];
-                        [d setInteger:size.height forKey:VIDEO_HEIGHT_KEY];
+                    NSDictionary *changes = isDefault
+                        ? @{VIDEO_WIDTH_KEY: [NSNull null], VIDEO_HEIGHT_KEY: [NSNull null]}
+                        : @{VIDEO_WIDTH_KEY: @(size.width), VIDEO_HEIGHT_KEY: @(size.height)};
+                    if (![showcase_preferences() applyChanges:changes]) {
+                        [weakSelf showSaveError];
+                        return;
                     }
-                    [d synchronize];
                     ip_log("settings: resolution=%ux%u", size.width, size.height);
                     [weakSelf pop];
                 }] height:52];
@@ -7275,7 +7521,7 @@ static BOOL g_settings_hardware_loading = NO;
     __weak SettingsViewController *weakSelf = self;
     NSString *chosen = showcase_chosen_language();
     void (^choose)(NSString *) = ^(NSString *language) {
-        showcase_set_language(language);
+        if (!showcase_set_language(language)) { [weakSelf showSaveError]; return; }
         ip_log("settings: language=%s", language ? language.UTF8String : "device");
         [weakSelf.appDelegate renderState];
         [weakSelf render];
@@ -7304,7 +7550,7 @@ static BOOL g_settings_hardware_loading = NO;
     [b card:^(SettingsCard *card) {
         UIView *row = [self switchRow:L(@"Detailed Logging") subtitle:nil
             on:logging width:w changed:^(BOOL on) {
-                [app applyDiagnosticsEnabled:on];
+                if (![app applyDiagnosticsEnabled:on]) { [weakSelf showSaveError]; return; }
                 weakSelf.pageMessage = nil;
                 [weakSelf render];
             }];
