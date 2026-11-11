@@ -14,11 +14,11 @@ CLANG="${CLANG:-clang}"
 LDID="${LDID:-ldid}"
 . "$REPO/packaging/scripts/version.sh"
 
-# Use the published Beta 5-2 rootless payload for the Bluetooth runtime.
-EXPECTED_SHA=f91ab0bf7ddf94d9eb1eacc56db37e8943ea8f1dce60c4976f793d679707a1d6
+# Use the published Beta 5-3 rootless payload for the Bluetooth runtime.
+EXPECTED_SHA=54ac2fafd6ed019e63e7919ddd6387bb38e5c03a0b3b87db33d902efe4d71db5
 ACTUAL_SHA="$(sha256sum < "$UPSTREAM_DEB" | cut -d ' ' -f 1)"
 if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
-  echo "The input must be the official Showcase Beta 5-2 rootless package." >&2
+  echo "The input must be the official Showcase Beta 5-3 rootless package." >&2
   exit 1
 fi
 
@@ -51,6 +51,7 @@ install -m 4755 "$WORK/CarDisplaySim" "$APP/CarDisplaySim"
 install -m 4755 "$WORK/CarPlay Simulator" "$APP/CarPlay Simulator"
 fill_version "$SRC/Info.plist" > "$APP/Info.plist"
 for localization in "$SRC"/Localizations/*.lproj; do
+  install -d "$APP/${localization##*/}"
   install -m 0644 "$localization/Localizable.strings" "$APP/${localization##*/}/Localizable.strings"
 done
 fill_version "$REPO/packaging/control-rootless/control" > "$ROOTFS/DEBIAN/control"

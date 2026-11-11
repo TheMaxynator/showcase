@@ -65,14 +65,18 @@ static NSDictionary *read_preferences_file(NSString *path) {
 static NSDictionary *legacy_showcase_preferences(void) {
     NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
     if (!bundleID.length) return @{};
+    NSMutableDictionary *legacy = [read_preferences_file(
+        @"/var/mobile/Library/Showcase/settings.plist") mutableCopy] ?: [NSMutableDictionary dictionary];
     NSDictionary *domain = [[NSUserDefaults standardUserDefaults] persistentDomainForName:bundleID];
-    if (domain.count) return domain;
-    NSString *relativePath = [NSString stringWithFormat:@"Library/Preferences/%@.plist", bundleID];
-    for (NSString *home in @[NSHomeDirectory(), @"/var/root", @"/var/mobile"]) {
-        domain = read_preferences_file([home stringByAppendingPathComponent:relativePath]);
-        if (domain.count) return domain;
+    if (!domain.count) {
+        NSString *relativePath = [NSString stringWithFormat:@"Library/Preferences/%@.plist", bundleID];
+        for (NSString *home in @[NSHomeDirectory(), @"/var/root", @"/var/mobile"]) {
+            domain = read_preferences_file([home stringByAppendingPathComponent:relativePath]);
+            if (domain.count) break;
+        }
     }
-    return @{};
+    [legacy addEntriesFromDictionary:domain ?: @{}];
+    return legacy;
 }
 
 @interface ShowcasePreferences : NSObject {
@@ -219,13 +223,13 @@ static ShowcasePreferences *showcase_preferences(void) {
 #define MOBILE_GLOBAL_PREFERENCES @"/var/mobile/Library/Preferences/.GlobalPreferences.plist"
 
 static NSArray<NSString *> *showcase_languages(void) {
-    return @[@"en", @"fr", @"es", @"zh-Hans", @"ja"];
+    return @[@"en", @"fr", @"es", @"zh-Hans", @"ja", @"tr"];
 }
 
 /* The language's own name, as iOS lists it. */
 static NSString *showcase_language_name(NSString *language) {
     NSDictionary *names = @{@"en": @"English", @"fr": @"Français", @"es": @"Español",
-                            @"zh-Hans": @"简体中文", @"ja": @"日本語"};
+                            @"zh-Hans": @"简体中文", @"ja": @"日本語", @"tr": @"Türkçe"};
     return names[language] ?: language;
 }
 
@@ -296,6 +300,7 @@ static NSString *L(NSString *english) {
 #define HELD_WIFI_NETWORK_KEY   @"heldWiFiNetworkSSID"
 /* Beta 6 turns Prioritize Quality on once; later choices are kept. */
 #define QUALITY_DEFAULT_SET_KEY @"qualityDefaultApplied"
+#define QUALITY_HSIC_RESTORED_KEY @"qualityHSICRestored"
 #define USAGE_KEY               @"anonymousUsageEnabled"
 #define USAGE_ID_KEY            @"anonymousUsageID"
 #define USAGE_SENT_KEY          @"anonymousUsageSentPayload"
@@ -1089,6 +1094,8 @@ static NSString *bluetooth_failure_class(NSString *reason,
     return @"bluetooth-takeover-failed";
 }
 
+static NSDictionary *usage_values(void);
+
 static NSString *bluetooth_diagnostic_report(
     NSString *reason, BOOL retryAttempted,
     BluetoothRegistryProbeState registry) {
@@ -1117,6 +1124,7 @@ static NSString *bluetooth_diagnostic_report(
     NSMutableString *report = [NSMutableString string];
     [report appendString:@"Showcase Bluetooth compatibility report\n"];
     [report appendFormat:@"version=%s\n", APP_VERSION];
+    [report appendFormat:@"package=%@ jailbreak=%@\n", usage_values()[@"package"], usage_values()[@"jailbreak"]];
     [report appendFormat:@"device=%@\n", hardware_machine_identifier()];
     [report appendFormat:@"ios=%@\n", [UIDevice currentDevice].systemVersion];
     [report appendFormat:@"layout=%@ (diagnostic only)\n", layout];
@@ -2067,7 +2075,6 @@ static void signal_processes_named(const char *name, int sig, pid_t preservedPid
     free(procs);
 }
 
-#ifdef SHOWCASE_TAURINE
 static BOOL process_named_running(const char *name) {
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
     size_t len = 0;
@@ -2083,7 +2090,6 @@ static BOOL process_named_running(const char *name) {
     free(procs);
     return found;
 }
-#endif
 
 #if !defined(SHOWCASE_TAURINE) && !defined(SHOWCASE_ROOTLESS)
 /* Taurine marks its install at the root and keeps jailbreakd in /taurine. */
@@ -3512,6 +3518,7 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
 @property (nonatomic, assign) pid_t tcpdumpPid;
 @property (nonatomic, copy)   NSString *currentTcpdumpPath;
 @property (nonatomic, strong) NSTimer *tcpdumpStopTimer;
+@property (nonatomic, strong) NSTimer *tcpdumpWaitTimer;
 @property (nonatomic, assign) BOOL tcpdumpMissingPromptShown;
 @property (nonatomic, assign) BOOL diagnosticsEnabled;
 @property (nonatomic, assign) BOOL helpersLoggedThisRun;
@@ -3651,7 +3658,15 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
     _diagnosticsEnabled = [showcase_preferences() boolForKey:DIAGNOSTICS_ENABLED_KEY];
     (void)carplay_display_hardware();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        __atomic_store_n(&g_display_wlan_attachment, wlan_attachment_class(), __ATOMIC_RELAXED);
+        CarPlayWLANAttachment attachment = wlan_attachment_class();
+        __atomic_store_n(&g_display_wlan_attachment, attachment, __ATOMIC_RELAXED);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if ([prefs boolForKey:QUALITY_HSIC_RESTORED_KEY]) return;
+            /* Apply upstream's one-time correction for HSIC receivers. */
+            NSMutableDictionary *changes = [@{QUALITY_HSIC_RESTORED_KEY: @YES} mutableCopy];
+            if (attachment == CarPlayWLANAttachmentHSIC) changes[QUALITY_VIDEO_KEY] = @NO;
+            [prefs applyChanges:changes];
+        });
     });
     /* A session that ended without stopFlow may have left a network paused. */
     dispatch_async(self.bgQueue, ^{
@@ -3815,7 +3830,8 @@ static pid_t reusable_baa_broker(void) {
         int rc = -1;
         uint8_t *leaf = NULL, *intermediate = NULL;
         int leafLength = 0, intermediateLength = 0;
-        uint64_t deadline = monotonic_nanos_now() + 45ULL * NSEC_PER_SEC;
+        uint64_t deadline = monotonic_nanos_now() +
+            (uint64_t)BAA_PREHEAT_TIMEOUT_SECONDS * NSEC_PER_SEC;
         while (monotonic_nanos_now() < deadline) {
             if (!pid_alive(self.baaBrokerPid)) {
                 rc = -1;
@@ -4737,7 +4753,10 @@ static pid_t reusable_baa_broker(void) {
     rc = run_blocking(launchctl, unloadBlueToolArgv);
     if (rc != 0) ip_log("  WARNING: BlueTool unload returned %d", rc);
 #endif
-    sleep(2);
+    /* Wait for Apple's Bluetooth to let go of the controller, up to 2 s. */
+    for (int i = 0; i < 40 && (process_named_running("bluetoothd") ||
+                                process_named_running("BlueTool")); i++)
+        usleep(50000);
 
     /* 2. Start bundled BTstack through launchd so the advertised socket exists. */
     char *unloadBTstackArgv[] = { (char*)"launchctl", (char*)"unload",
@@ -5534,8 +5553,22 @@ static NSString *hotspot_name(void) {
         return;
     }
 
+    /* tcpdump exits at once on an interface that is not up yet, so wait
+     * for the hotspot (up to 15 minutes) instead. */
     if (!is_ap_up()) {
-        ip_log("tcpdump warning: %s is not up yet; capture may exit", AP_INTERFACE);
+        if (self.tcpdumpWaitTimer) return;
+        ip_log("tcpdump waits for %s to come up", AP_INTERFACE);
+        __weak typeof(self) weakSelf = self;
+        __block int seconds = 0;
+        self.tcpdumpWaitTimer = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES
+            block:^(NSTimer *timer) {
+                if (!is_ap_up() && ++seconds < 900) return;
+                [timer invalidate];
+                weakSelf.tcpdumpWaitTimer = nil;
+                if (is_ap_up()) [weakSelf startNetworkDumpCapture];
+                else ip_log("tcpdump not started; %s never came up", AP_INTERFACE);
+            }];
+        return;
     }
 
     NSString *stamp = [self timestampStringForFilename];
@@ -5547,7 +5580,7 @@ static NSString *hotspot_name(void) {
     if (![self spawnTcpdumpAtPath:path useSelfTimeout:NO]) {
         ip_log("tcpdump timed mode failed; retrying plain mode with app timer");
         if (![self spawnTcpdumpAtPath:path useSelfTimeout:YES]) {
-            [self promptInstallTcpdumpIfNeeded];
+            ip_log("tcpdump could not start; see tcpdump.log");
             return;
         }
     }
@@ -5563,6 +5596,7 @@ static NSString *hotspot_name(void) {
 
 - (void)stopNetworkDumpCaptureWithReason:(NSString *)reason {
     [self.tcpdumpStopTimer invalidate]; self.tcpdumpStopTimer = nil;
+    [self.tcpdumpWaitTimer invalidate]; self.tcpdumpWaitTimer = nil;
     pid_t pid = self.tcpdumpPid;
     if (pid <= 0) return;
 
@@ -5669,6 +5703,7 @@ static NSString *hotspot_name(void) {
     NSMutableString *env = [NSMutableString string];
     [env appendFormat:@"Showcase diagnostics\n"];
     [env appendFormat:@"version=%s\n", APP_VERSION];
+    [env appendFormat:@"package=%@ jailbreak=%@\n", usage_values()[@"package"], usage_values()[@"jailbreak"]];
 #ifdef SHOWCASE_ROOTLESS
     [env appendString:@"layout=rootless\n"];
 #else
@@ -5709,6 +5744,11 @@ static NSString *hotspot_name(void) {
     [self copyPath:@"/tmp/hci_dump.pklg" toDiagnosticsDir:work name:@"hci_dump.pklg"];
     [self copyPath:@SHOWCASE_BTSTACK_LOG_PATH toDiagnosticsDir:work name:@"BTstack.log"];
     [self copyPath:@TCPDUMP_LOG toDiagnosticsDir:work name:@"tcpdump.log"];
+    /* Share's state and Apple's own Wi-Fi log, when present, explain most hotspot failures. */
+    [self copyPath:@"/var/mobile/Library/Share/status.json" toDiagnosticsDir:work name:@"Share-status.json"];
+    [self copyPath:@"/var/mobile/Library/Share/radio.json" toDiagnosticsDir:work name:@"Share-radio.json"];
+    [self copyPath:@"/var/mobile/Documents/Share-Report.json" toDiagnosticsDir:work name:@"Share-Report.json"];
+    [self copyPath:@"/tmp/wifi.log" toDiagnosticsDir:work name:@"wifi.log"];
     [self copyPath:[NSString stringWithUTF8String:BTSTACK_PREFS]
   toDiagnosticsDir:work name:@"ch.ringwald.btstack.plist"];
     [self copyPath:[NSString stringWithUTF8String:BTSTACK_PLIST]
@@ -7637,7 +7677,7 @@ static BOOL g_settings_hardware_loading = NO;
     CGFloat w = b.width;
     __weak SettingsViewController *weakSelf = self;
     BOOL logging = app.diagnosticsEnabled;
-    BOOL capturing = app.tcpdumpPid > 0 && pid_alive(app.tcpdumpPid);
+    BOOL capturing = app.tcpdumpWaitTimer || (app.tcpdumpPid > 0 && pid_alive(app.tcpdumpPid));
     BOOL haveTcpdump = tcpdump_tool_path() != NULL;
     NSString *lastCapture = capturing ? nil : [app latestNetworkDumpPath];
 

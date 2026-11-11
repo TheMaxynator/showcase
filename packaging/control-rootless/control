@@ -14,5 +14,6 @@ Description: Wireless CarPlay receiver for rootless jailbreaks
  This Showcase fork focuses on the iPhone 13 Pro running iOS 15.0.2 with
  Dopamine. The package uses the rootless layout under /var/jb.
  .
- The first release includes persistent settings, reversed landscape,
- notch clearance, edge touch handling, and connection recovery fixes.
+ Includes persistent settings, reversed landscape, notch clearance,
+ edge touch handling, connection recovery, iOS 27 request framing,
+ and saved CarPlay authentication for offline starts.

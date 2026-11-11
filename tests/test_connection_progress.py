@@ -8,7 +8,7 @@ import tempfile
 
 source = (Path(__file__).resolve().parents[1]/'source/carplay_services.m').read_text(encoding='utf-8')
 start = source.index('static void route_request(')
-router = source[start:source.index('static void handle_client(', start)]
+router = source[start:source.index('\n}', start) + 2]
 listener = source[source.index('static bool start_airplay_server('):source.index('static bool start_airplay_server(')+2300]
 assert 'app_send_status(STATUS_IPHONE_CONNECTED)' not in listener
 harness = r'''
