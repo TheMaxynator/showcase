@@ -23,6 +23,7 @@
         <string>es</string>
         <string>zh-Hans</string>
         <string>ja</string>
+        <string>tr</string>
     </array>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
@@ -76,7 +77,7 @@
         </dict>
     </dict>
 
-    <!-- Controllers choose the saved landscape direction at runtime. -->
+    <!-- Controllers narrow long-screen phones to LandscapeLeft at runtime. -->
     <key>UIInterfaceOrientation</key>
     <string>UIInterfaceOrientationLandscapeLeft</string>
     <key>UISupportedInterfaceOrientations</key>
