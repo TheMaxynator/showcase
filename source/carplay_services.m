@@ -512,7 +512,8 @@ static NSDictionary *request_baa(NSDictionary *options, NSError **failure) {
 
     if (dispatch_semaphore_wait(
             semaphore,
-            dispatch_time(DISPATCH_TIME_NOW, 45LL * NSEC_PER_SEC)) != 0) {
+            dispatch_time(DISPATCH_TIME_NOW,
+                          (int64_t)BAA_ISSUE_TIMEOUT_SECONDS * NSEC_PER_SEC)) != 0) {
         printf("[BAA] Preheat timed out\n");
         return nil;
     }
@@ -686,8 +687,10 @@ static int run_baa_broker(void) {
             if (errno == EINTR) continue;
             break;
         }
-        @autoreleasepool {
-            baa_broker_handle_client(client);
+        if (baa_socket_timeout(client)) {
+            @autoreleasepool {
+                baa_broker_handle_client(client);
+            }
         }
         close(client);
     }
@@ -5340,6 +5343,14 @@ static void route_request(int sock, const HTTPReq *r) {
         }
     }
     else if (strcasecmp(r->method, "POST") == 0) {
+        /* A TCP accept or GET /info can be a browser/diagnostic probe.
+         * Advance the UI only when a peer actually begins pairing/auth,
+         * rather than reporting every port-7000 client as an iPhone. */
+        if (r->body && r->bodyLen > 0 &&
+            (strcmp(r->path, "/pair-setup") == 0 ||
+             strcmp(r->path, "/pair-verify") == 0 ||
+             strcmp(r->path, "/auth-setup") == 0))
+            app_send_status(STATUS_IPHONE_CONNECTED);
         if (strstr(r->path, "/pair-setup"))
             handle_pair_setup(sock, r);
         else if (strstr(r->path, "/pair-verify"))
@@ -5604,7 +5615,6 @@ static bool start_airplay_server(uint16_t port) {
             printf("\n[AP] *** NEW CONNECTION from %s:%s family=%s ***\n",
                    host, serv, addr_family_name(ca.ss_family));
             fflush(stdout);
-            app_send_status(STATUS_IPHONE_CONNECTED);
 
             /* Handle each connection in its own dispatch queue */
             dispatch_async(dispatch_get_global_queue(0, 0), ^{

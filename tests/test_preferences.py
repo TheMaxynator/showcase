@@ -18,6 +18,13 @@ START = SOURCE.index("@interface ShowcasePreferences")
 END = SOURCE.index("static ShowcasePreferences *showcase_preferences", START)
 READER_START = SOURCE.index("static NSDictionary *read_preferences_file")
 READER_END = SOURCE.index("static NSDictionary *legacy_showcase_preferences", READER_START)
+LEGACY = SOURCE[READER_END:START]
+# Supply an isolated legacy domain and files to the production migration code.
+LEGACY = LEGACY.replace('[NSBundle mainBundle].bundleIdentifier', '@"ShowcaseMigrationTest"')
+LEGACY = LEGACY.replace('@"/var/mobile/Library/Showcase/settings.plist"', 'legacyBackupPath')
+LEGACY = LEGACY.replace('[[NSUserDefaults standardUserDefaults] persistentDomainForName:bundleID]',
+                        'legacyCurrent')
+LEGACY = LEGACY.replace('@[NSHomeDirectory(), @"/var/root", @"/var/mobile"]', '@[legacyHome]')
 
 PREAMBLE = r"""
 #import <Foundation/Foundation.h>
@@ -27,12 +34,8 @@ PREAMBLE = r"""
 #include <unistd.h>
 
 static void ip_log(const char *message, ...) { (void)message; }
-static NSDictionary *legacy_showcase_preferences(void) {
-    return @{
-        @"apSSID": @"Old hotspot", @"apPassword": @"old-password",
-        @"prioritizeVideoQuality": @(NO), @"videoWidth": @1024, @"videoHeight": @576
-    };
-}
+static NSString *legacyHome, *legacyBackupPath;
+static NSDictionary *legacyCurrent;
 """
 
 SCENARIOS = r"""
@@ -41,6 +44,16 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         NSString *directory = [NSString stringWithUTF8String:argv[1]];
         NSString *phase = [NSString stringWithUTF8String:argv[2]];
+        legacyHome = [directory stringByAppendingString:@".legacy"];
+        legacyBackupPath = [legacyHome stringByAppendingPathComponent:@"settings.plist"];
+        assert([[NSFileManager defaultManager] createDirectoryAtPath:legacyHome
+            withIntermediateDirectories:YES attributes:nil error:NULL]);
+        assert(([@{
+            @"apSSID": @"Old hotspot", @"apPassword": @"old-password",
+            @"prioritizeVideoQuality": @(YES), @"videoWidth": @1024, @"videoHeight": @576
+        } writeToFile:legacyBackupPath atomically:YES]));
+        /* A partial system domain must retain the backup's hotspot details. */
+        legacyCurrent = @{@"prioritizeVideoQuality": @(NO), @"qualityDefaultApplied": @(YES)};
         ShowcasePreferences *preferences = [[ShowcasePreferences alloc] initWithDirectory:directory];
         [preferences registerDefaults:@{@"startCarPlayOnLaunch": @(YES)}];
         assert([preferences boolForKey:@"startCarPlayOnLaunch"]);
@@ -97,7 +110,7 @@ with tempfile.TemporaryDirectory() as temp:
     workspace = Path(temp)
     check = workspace / "check"
     code = check.with_suffix(".m")
-    code.write_text(PREAMBLE + SOURCE[READER_START:READER_END] + SOURCE[START:END] + SCENARIOS)
+    code.write_text(PREAMBLE + SOURCE[READER_START:READER_END] + LEGACY + SOURCE[START:END] + SCENARIOS)
     subprocess.run(["clang", *compile_flags, str(code), "-o", str(check), *link_flags], check=True)
     settings = workspace / "settings"
     for phase in ("write", "reload", "reset", "failed-write"):

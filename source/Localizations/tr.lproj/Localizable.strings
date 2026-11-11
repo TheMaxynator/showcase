@@ -48,6 +48,7 @@
 "This iPad's hotspot is called “%@”. Your iPhone joins the name you enter here, so it has to match. To use “%@”, rename the iPad in Settings > General > About > Name." = "Bu iPad’in erişim noktasının adı “%@”. iPhone’unuz burada girdiğiniz ağa bağlanır; bu nedenle adlar eşleşmeli. “%@” kullanmak için iPad’in adını Ayarlar > Genel > Hakkında > Ad bölümünden değiştirin.";
 "Use “%@”" = "“%@” Kullan";
 "Keep" = "Olduğu Gibi Bırak";
+"Could not save settings. Try again." = "Ayarlar kaydedilemedi. Tekrar deneyin.";
 "%@\n\nSaved to:\n%@" = "%@\n\nKaydedildiği yer:\n%@";
 "The share sheet could not be shown." = "Paylaşım ekranı gösterilemedi.";
 "Export Saved" = "Dışa Aktarılan Dosya Kaydedildi";
@@ -93,6 +94,7 @@
 "Play Sound on This %@" = "Sesi Bu %@ Üzerinde Çal";
 "%u × %u at %u fps" = "%u × %u, %u fps";
 "Dock on the Right" = "Dock Sağda";
+"Flip Landscape Orientation" = "Yatay Yönü Ters Çevir";
 "Prioritize Quality" = "Kaliteye Öncelik Ver";
 "Prioritize Performance" = "Performansa Öncelik Ver";
 "Frame Rate" = "Kare Hızı";

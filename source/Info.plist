@@ -77,7 +77,7 @@
         </dict>
     </dict>
 
-    <!-- Controllers narrow long-screen phones to LandscapeLeft at runtime. -->
+    <!-- Controllers choose the saved landscape direction at runtime. -->
     <key>UIInterfaceOrientation</key>
     <string>UIInterfaceOrientationLandscapeLeft</string>
     <key>UISupportedInterfaceOrientations</key>

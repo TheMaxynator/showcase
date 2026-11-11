@@ -26,6 +26,9 @@
 
 #define BAA_BROKER_PATH          "/tmp/showcase_baa.sock"
 #define BAA_BROKER_TIMEOUT_SECONDS 2
+/* Certificate issuance may retry with default options on older iOS. */
+#define BAA_ISSUE_TIMEOUT_SECONDS 45
+#define BAA_PREHEAT_TIMEOUT_SECONDS (2 * BAA_ISSUE_TIMEOUT_SECONDS + 5)
 #define BAA_BROKER_MAGIC         "BAA3"
 #define BAA_BROKER_HEADER_SIZE   12
 #define BAA_BROKER_MAX_PAYLOAD   (64U * 1024U)

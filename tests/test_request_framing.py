@@ -33,6 +33,14 @@ static RequestState take(HTTPReq *r, size_t *length) {
 
 int main(void) {
     HTTPReq r; size_t n;
+    /* A partial record has no NUL terminator beyond the received bytes. */
+    const char partial[] = "GET /info RTSP/1.0\r\nCSe";
+    uint8_t *shortBuffer = malloc(sizeof(partial) - 1);
+    assert(shortBuffer);
+    memcpy(shortBuffer, partial, sizeof(partial) - 1);
+    assert(parse_http(shortBuffer, sizeof(partial) - 1, &r) && !r.body);
+    free(shortBuffer);
+
     /* iOS 27: SETUP with an 832-byte body arrives as 816 + 16. */
     char head[] = "SETUP rtsp://x/1 RTSP/1.0\r\nCSeq: 7\r\nContent-Length: 832\r\n\r\n";
     char body[832]; memset(body, 'b', sizeof(body)); body[831] = 'Z';
